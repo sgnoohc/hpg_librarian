@@ -10,10 +10,15 @@ import datetime
 import math
 import pytz
 
+qos = "avery"
+
+if len(sys.argv) > 1:
+    qos = "avery-b"
+
 #----------------------------------------
 # Configuration
 time_res = 600 # 10 minutes
-time_window = 432000 # 5 days
+time_window = 3600 * 24 * 5 # 5 days
 #----------------------------------------
 
 # Current time
@@ -41,9 +46,9 @@ observables = [
         "NNodes",
         ]
 thresholds = {
-        "NCPUS" : 430,
-        "NGPUS" : 14,
-        "ReqMem" : 3359,
+        "NCPUS" : 430 if qos == "avery" else 3870,
+        "NGPUS" : 14 if qos == "avery" else 0,
+        "ReqMem" : 3359 if qos == "avery" else 30234,
         "NNodes": 0,
         }
 nicenames = {
@@ -85,7 +90,7 @@ for i, c in enumerate(column_headers):
 
 # Process the Slurm command and obtain the data
 columns = ",".join(column_headers)
-os.system(f"sacct -a -S {from_date} -q avery --format=\"{columns}\" -P --noconvert > data.txt")
+os.system(f"sacct -a -S {from_date} -q {qos} --format=\"{columns}\" -P --noconvert > data.txt")
 
 df = pd.read_csv("data.txt", sep="|")
 df = df[~df.User.isna()] # Get rid of rows with user name NaN
@@ -177,8 +182,11 @@ for observable in observables:
     plt.figure(figsize=(10, 6))
     stack_data = [df[col] for col in users]
     plt.stackplot(df.index, stack_data, labels=users)
-    plt.plot(df.index, df['Total'], color='black', linewidth=2, label='Total')
-    plt.title(f'{nicenames[observable]} Usage Over Time (MAX: {threshold_value})')
+    # plt.plot(df.index, df['Total'], color='black', linewidth=2, label='Total')
+    if threshold_value != 0:
+        plt.title(f'{nicenames[observable]} Usage Over Time (MAX: {threshold_value})')
+    else:
+        plt.title(f'{nicenames[observable]} Usage Over Time')
     plt.xlabel('Time')
     plt.ylabel(f'{nicenames[observable]} Usage')
     plt.grid(True)
@@ -198,5 +206,5 @@ for observable in observables:
 
     # Show or save the plot
     plt.yscale('linear')
-    plt.savefig(f"{shortnames[observable]}.png")
-    plt.savefig(f"{shortnames[observable]}.pdf")
+    plt.savefig(f"{shortnames[observable]}_{qos}.png")
+    plt.savefig(f"{shortnames[observable]}_{qos}.pdf")
