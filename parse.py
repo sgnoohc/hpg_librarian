@@ -12,7 +12,7 @@ import pytz
 
 #----------------------------------------
 # Configuration
-time_res = 60 # 10 minutes
+time_res = 600 # 10 minutes
 time_window = 432000 # 5 days
 #----------------------------------------
 
@@ -37,13 +37,28 @@ d = {}
 observables = [
         "NCPUS",
         "NGPUS",
-        "ReqMem"
+        "ReqMem",
+        "NNodes",
         ]
 thresholds = {
         "NCPUS" : 430,
         "NGPUS" : 14,
         "ReqMem" : 3359,
+        "NNodes": 0,
         }
+nicenames = {
+        "NCPUS" : "# of CPUs",
+        "NGPUS" : "# of GPUs",
+        "ReqMem" : "Memory (GB)",
+        "NNodes": "# of Jobs",
+        }
+shortnames = {
+        "NCPUS" : "NCPUS",
+        "NGPUS" : "NGPUS",
+        "ReqMem" : "MEMORY",
+        "NNodes": "NJOBS",
+        }
+
 
 # Following are the data to obtain
 column_headers = [
@@ -96,6 +111,7 @@ selected_columns = [
         "Submit",
         "NCPUS",
         "NGPUS",
+        "NNodes",
         "ReqMem",
         "State",
         "Priority",
@@ -162,22 +178,25 @@ for observable in observables:
     stack_data = [df[col] for col in users]
     plt.stackplot(df.index, stack_data, labels=users)
     plt.plot(df.index, df['Total'], color='black', linewidth=2, label='Total')
-    plt.title(f'{observable} Usage Over Time (MAX: {threshold_value})')
+    plt.title(f'{nicenames[observable]} Usage Over Time (MAX: {threshold_value})')
     plt.xlabel('Time')
-    plt.ylabel(f'{observable} Usage')
+    plt.ylabel(f'{nicenames[observable]} Usage')
     plt.grid(True)
     plt.legend(loc='upper left')
 
     # Rotate x-axis labels for readability (optional)
     plt.xticks(rotation=45)
 
+    # Add a threshold line of maximum usage
+    if threshold_value != 0:
+        plt.axhline(y=threshold_value, color='red', linestyle='--', label=f'Threshold ({threshold_value})')
+
+    plt.tight_layout()
+
     # Set the max value
     plt.ylim(0, 1.7 * max_value)
 
-    # Add a threshold line of maximum usage
-    plt.axhline(y=threshold_value, color='red', linestyle='--', label=f'Threshold ({threshold_value})')
-
     # Show or save the plot
-    plt.tight_layout()
-    plt.savefig(f"{observable}.png")
-    plt.savefig(f"{observable}.pdf")
+    plt.yscale('linear')
+    plt.savefig(f"{shortnames[observable]}.png")
+    plt.savefig(f"{shortnames[observable]}.pdf")
