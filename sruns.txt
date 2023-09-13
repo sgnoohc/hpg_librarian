@@ -1,0 +1,3 @@
+srun --partition=gpu --cpus=8 --gpus=1 --mem=16gb --constraint=a100 --pty bash -i
+srun --partition=gpu          --gpus=1 --mem=16gb --constraint=a100 --pty bash -i
+srun --ntasks=1 --cpus-per-task=1 --mem=2gb -t 6:00:00 --pty bash -i

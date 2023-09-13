@@ -90,7 +90,7 @@ for i, c in enumerate(column_headers):
 
 # Process the Slurm command and obtain the data
 columns = ",".join(column_headers)
-os.system(f"sacct -a -S {from_date} -q {qos} --format=\"{columns}\" -P --noconvert > data.txt")
+os.system(f"/opt/slurm/bin/sacct -a -S {from_date} -q {qos} --format=\"{columns}\" -P --noconvert > data.txt")
 
 df = pd.read_csv("data.txt", sep="|")
 df = df[~df.User.isna()] # Get rid of rows with user name NaN
