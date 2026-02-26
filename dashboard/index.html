@@ -159,7 +159,6 @@ body {
   overflow: hidden;
 }
 .chart-box { width: 100%; height: 380px; }
-.drain-chart-box { width: 100%; height: 500px; }
 .table-section {
   padding: 12px 24px 24px;
 }
@@ -179,8 +178,6 @@ th, td {
 }
 th { font-weight: 600; background: var(--bg-secondary); }
 tr:nth-child(even) { background: var(--table-stripe); }
-#drain-section { display: none; }
-#qos-section { display: block; }
 .status-bar {
   padding: 4px 24px;
   font-size: 0.78rem;
@@ -201,7 +198,6 @@ tr:nth-child(even) { background: var(--table-stripe); }
 <div class="tabs">
   <button class="tab active" data-tab="avery">avery</button>
   <button class="tab" data-tab="avery-b">avery-b</button>
-  <button class="tab" data-tab="drain">drain</button>
 </div>
 
 <div id="qos-section">
@@ -244,11 +240,6 @@ tr:nth-child(even) { background: var(--table-stripe); }
   </div>
 </div>
 
-<div id="drain-section">
-  <div class="grid" style="grid-template-columns:1fr;">
-    <div class="chart-container"><div id="chart-drain" class="drain-chart-box"></div></div>
-  </div>
-</div>
 
 <div class="status-bar" id="status-bar">Loading...</div>
 
@@ -258,7 +249,6 @@ tr:nth-child(even) { background: var(--table-stripe); }
     'avery': 'data_avery.json',
     'avery-b': 'data_avery-b.json',
   };
-  const DRAIN_FILE = 'drain_data.json';
   const REFRESH_MS = 5 * 60 * 1000;
   const OBS_KEYS = ['NCPUS', 'NGPUS', 'MEMORY', 'NJOBS'];
 
@@ -267,7 +257,6 @@ tr:nth-child(even) { background: var(--table-stripe); }
   let customStart = null;
   let customEnd = null;
   let cache = {};
-  let drainCache = null;
   let darkMode = localStorage.getItem('darkMode') === 'true';
 
   if (darkMode) document.documentElement.setAttribute('data-theme', 'dark');
@@ -284,15 +273,7 @@ tr:nth-child(even) { background: var(--table-stripe); }
     tabs.forEach(x => x.classList.remove('active'));
     t.classList.add('active');
     currentTab = t.dataset.tab;
-    if (currentTab === 'drain') {
-      document.getElementById('qos-section').style.display = 'none';
-      document.getElementById('drain-section').style.display = 'block';
-      renderDrain();
-    } else {
-      document.getElementById('qos-section').style.display = 'block';
-      document.getElementById('drain-section').style.display = 'none';
-      renderQoS();
-    }
+    renderQoS();
   }));
 
   // Time range preset buttons
@@ -360,14 +341,12 @@ tr:nth-child(even) { background: var(--table-stripe); }
 
   async function loadData() {
     try {
-      const [avery, averyb, drain] = await Promise.all([
+      const [avery, averyb] = await Promise.all([
         fetchJSON(DATA_FILES['avery']),
         fetchJSON(DATA_FILES['avery-b']),
-        fetchJSON(DRAIN_FILE).catch(() => null),
       ]);
       cache['avery'] = avery;
       cache['avery-b'] = averyb;
-      drainCache = drain;
       statusBar.textContent = 'Data loaded at ' + new Date().toLocaleTimeString();
       if (avery.metadata.last_updated) {
         lastUpdatedEl.textContent = 'Updated: ' + avery.metadata.last_updated;
@@ -536,40 +515,12 @@ tr:nth-child(even) { background: var(--table-stripe); }
     });
   }
 
-  function renderDrain() {
-    if (!drainCache) {
-      Plotly.react('chart-drain', [], { title: 'No drain data available' }, { responsive: true });
-      return;
-    }
-    const colors = getPlotColors();
-    const traces = [{
-      x: drainCache.timestamps,
-      y: drainCache.values,
-      type: 'scatter',
-      mode: 'lines+markers',
-      name: 'CPUs to drain',
-      line: { color: '#4f8cff' },
-      marker: { size: 3 },
-    }];
-    const layout = {
-      title: { text: 'CPUs to be Drained', font: { size: 16, color: colors.text } },
-      hovermode: 'x unified',
-      margin: { l: 60, r: 20, t: 50, b: 50 },
-      paper_bgcolor: colors.bg,
-      plot_bgcolor: colors.bg,
-      xaxis: { gridcolor: colors.grid, tickfont: { color: colors.text }, title: { text: 'Time', font: { color: colors.text } } },
-      yaxis: { gridcolor: colors.grid, tickfont: { color: colors.text }, title: { text: 'N CPUs', font: { color: colors.text } }, rangemode: 'tozero' },
-    };
-    Plotly.react('chart-drain', traces, layout, { responsive: true, displayModeBar: true });
-  }
-
   async function init() {
     await loadData();
     renderQoS();
     setInterval(async () => {
       await loadData();
-      if (currentTab === 'drain') renderDrain();
-      else renderQoS();
+      renderQoS();
     }, REFRESH_MS);
   }
 
