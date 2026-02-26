@@ -4,6 +4,7 @@ import csv
 import time
 import sys
 import os
+import json
 import pandas as pd
 import matplotlib.pyplot as plt
 import datetime
@@ -17,8 +18,8 @@ if len(sys.argv) > 1:
 
 #----------------------------------------
 # Configuration
-time_res = 600 # 10 minutes
-time_window = 3600 * 24 * 5 # 5 days
+time_res = 3600 # 1 hour
+time_window = 3600 * 24 * 30 # 30 days
 #----------------------------------------
 
 # Current time
@@ -47,7 +48,7 @@ observables = [
         ]
 thresholds = {
         "NCPUS" : 430 if qos == "avery" else 3870,
-        "NGPUS" : 14 if qos == "avery" else 0,
+        "NGPUS" : 39 if qos == "avery" else 0,
         "ReqMem" : 3359 if qos == "avery" else 30234,
         "NNodes": 0,
         }
@@ -90,13 +91,17 @@ for i, c in enumerate(column_headers):
 
 # Process the Slurm command and obtain the data
 columns = ",".join(column_headers)
-os.system(f"/opt/slurm/bin/sacct -a -S {from_date} -q {qos} --format=\"{columns}\" -P --noconvert > data.txt")
+os.system(f"/opt/slurm/bin/sacct -a -S {from_date} -q {qos} --format=\"{columns}\" -P --noconvert > {qos}.txt")
 
-df = pd.read_csv("data.txt", sep="|")
+df = pd.read_csv(f"{qos}.txt", sep="|")
 df = df[~df.User.isna()] # Get rid of rows with user name NaN
 
-df["Start"] = df["Start"].apply(lambda x : int(time.mktime(time.strptime(x, "%Y-%m-%dT%H:%M:%S"))) if x != "Unknown" else 0)
-df["Submit"] = df["Submit"].apply(lambda x : int(time.mktime(time.strptime(x, "%Y-%m-%dT%H:%M:%S"))) if x != "Unknown" else 0)
+#pd.set_option('display.max_rows', None)     # Show all rows
+
+#print(df["Start"])
+
+df["Start"] = df["Start"].apply(lambda x : int(time.mktime(time.strptime(x, "%Y-%m-%dT%H:%M:%S"))) if x != "Unknown" and x != "None" else 0)
+df["Submit"] = df["Submit"].apply(lambda x : int(time.mktime(time.strptime(x, "%Y-%m-%dT%H:%M:%S"))) if x != "Unknown" and x != "None" else 0)
 df["ElapsedRaw"] = df["ElapsedRaw"].apply(lambda x : int(x))
 df["End"] = df["Start"] + df["ElapsedRaw"]
 df['NGPUS'] = df["ReqTRES"].apply(lambda x : int(x.split("gpu=")[1].split(",")[0]) if "gpu" in x else 0)
@@ -175,13 +180,14 @@ for observable in observables:
     df = pd.DataFrame(data, index = time_idxs)
     df.index = pd.to_datetime(df.index, unit='s')
     df['Total'] = df[users].sum(axis=1)
-    max_value = df[['Total'] + users].max().max()
+    max_value = df[['Total'] + users].max().max() if len(users) > 0 else 0
     threshold_value = thresholds[observable]
 
     # Create the stacked area plot
     plt.figure(figsize=(10, 6))
-    stack_data = [df[col] for col in users]
-    plt.stackplot(df.index, stack_data, labels=users)
+    if len(users) > 0:
+        stack_data = [df[col] for col in users]
+        plt.stackplot(df.index, stack_data, labels=users)
     # plt.plot(df.index, df['Total'], color='black', linewidth=2, label='Total')
     if threshold_value != 0:
         plt.title(f'{nicenames[observable]} Usage Over Time (MAX: {threshold_value})')
@@ -208,3 +214,31 @@ for observable in observables:
     plt.yscale('linear')
     plt.savefig(f"{shortnames[observable]}_{qos}.png")
     plt.savefig(f"{shortnames[observable]}_{qos}.pdf")
+
+# Export JSON data for interactive dashboard
+json_time_idxs = [
+    datetime.datetime.fromtimestamp(t, tz=eastern_timezone).strftime('%Y-%m-%dT%H:%M:%S%z')
+    for t in time_idxs
+]
+
+json_observables = {}
+for observable in observables:
+    json_observables[shortnames[observable]] = {}
+    for user in users:
+        json_observables[shortnames[observable]][user] = [round(v, 2) for v in d[user][observable]]
+
+json_data = {
+    "metadata": {
+        "qos": qos,
+        "last_updated": datetime.datetime.now(eastern_timezone).strftime('%Y-%m-%dT%H:%M:%S%z'),
+        "time_resolution_seconds": time_res,
+    },
+    "time_idxs": json_time_idxs,
+    "users": users,
+    "observables": json_observables,
+    "thresholds": {shortnames[k]: v for k, v in thresholds.items()},
+    "nice_names": {shortnames[k]: v for k, v in nicenames.items()},
+}
+
+with open(f"data_{qos}.json", "w") as f:
+    json.dump(json_data, f)
