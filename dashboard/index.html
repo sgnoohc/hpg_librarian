@@ -158,40 +158,7 @@ body {
   background: var(--border);
   margin: 0 4px;
 }
-.custom-tooltip {
-  position: absolute;
-  pointer-events: none;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 6px 10px;
-  font-size: 0.78rem;
-  line-height: 1.5;
-  z-index: 1000;
-  box-shadow: 0 2px 8px rgba(0,0,0,0.15);
-  white-space: nowrap;
-  display: none;
-  color: var(--text);
-}
-.custom-tooltip .tt-time {
-  font-weight: 600;
-  margin-bottom: 3px;
-  border-bottom: 1px solid var(--border);
-  padding-bottom: 3px;
-}
-.custom-tooltip .tt-row {
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
-}
-.custom-tooltip .tt-swatch {
-  display: inline-block;
-  width: 10px;
-  height: 10px;
-  border-radius: 2px;
-  margin-right: 4px;
-  vertical-align: middle;
-}
+
 .grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -277,7 +244,6 @@ tr:nth-child(even) { background: var(--table-stripe); }
     <div class="chart-container"><div id="chart-MEMORY" class="chart-box"></div></div>
     <div class="chart-container"><div id="chart-NJOBS" class="chart-box"></div></div>
   </div>
-  <div class="custom-tooltip" id="custom-tooltip"></div>
   <div class="table-section">
     <h2>Current User Usage (Last Time Bin)</h2>
     <table id="user-table">
@@ -513,20 +479,22 @@ tr:nth-child(even) { background: var(--table-stripe); }
         if (!vals) return null;
         const sliced = vals.slice(startIdx, endIdx);
         const maxVal = Math.max(...sliced);
-        if (maxVal === 0) return null; // skip users with all zeros
+        if (maxVal === 0) return null; // skip users with all zeros in range
+        // Replace zeros with null so they are hidden from unified hover
+        const yvals = sliced.map(v => v > 0 ? v : null);
         return {
           x: filteredTimes,
-          y: sliced,
+          y: yvals,
           name: user,
           type: 'scatter',
           mode: 'none',
           stackgroup: 'one',
           line: { width: 0, shape: useSnapshot ? 'hv' : 'linear' },
-          hoverinfo: 'skip',
+          hovertemplate: '%{y:.1f}<extra>%{fullData.name}</extra>',
           _maxVal: maxVal,
         };
       }).filter(Boolean);
-      // Sort traces so largest users are stacked on top (and appear first in hover)
+      // Sort: largest last so they appear first in unified hover (reverse trace order)
       traces.sort((a, b) => a._maxVal - b._maxVal);
 
       const threshold = data.thresholds[obsKey];
@@ -556,7 +524,7 @@ tr:nth-child(even) { background: var(--table-stripe); }
       }] : [];
       const layout = {
         title: { text: niceName + ' (' + currentTab + ', ' + modeLabel + ')', font: { size: 14, color: colors.text } },
-        hovermode: 'x',
+        hovermode: 'x unified',
         showlegend: true,
         legend: { font: { size: 10, color: colors.text }, bgcolor: 'rgba(0,0,0,0)' },
         margin: { l: 50, r: 20, t: 40, b: 50 },
@@ -569,49 +537,6 @@ tr:nth-child(even) { background: var(--table-stripe); }
       };
 
       Plotly.react('chart-' + obsKey, traces, layout, { responsive: true, displayModeBar: true });
-
-      const chartEl = document.getElementById('chart-' + obsKey);
-      const tooltip = document.getElementById('custom-tooltip');
-      const TOP_N_HOVER = 10;
-
-      chartEl.on('plotly_hover', function(eventData) {
-        if (!eventData.points || !eventData.points.length) return;
-        const ptIdx = eventData.points[0].pointIndex;
-        // Gather all trace values at this x index
-        const entries = [];
-        const plotData = chartEl.data;
-        for (let i = 0; i < plotData.length; i++) {
-          const val = plotData[i].y[ptIdx];
-          if (val > 0) {
-            entries.push({ name: plotData[i].name, val: val, color: plotData[i].fillcolor || plotData[i].line?.color || '#888' });
-          }
-        }
-        if (entries.length === 0) { tooltip.style.display = 'none'; return; }
-        entries.sort((a, b) => b.val - a.val);
-        const shown = entries.slice(0, TOP_N_HOVER);
-        const hidden = entries.length - shown.length;
-        const timeStr = eventData.points[0].x;
-        let html = '<div class="tt-time">' + timeStr + '</div>';
-        shown.forEach(e => {
-          html += '<div class="tt-row"><span><span class="tt-swatch" style="background:' + e.color + '"></span>' + e.name + '</span><span>' + e.val.toFixed(1) + '</span></div>';
-        });
-        if (hidden > 0) html += '<div style="color:#999;font-size:0.72rem;">+' + hidden + ' more</div>';
-        tooltip.innerHTML = html;
-        tooltip.style.display = 'block';
-        // Position near mouse
-        const bbox = chartEl.getBoundingClientRect();
-        const ex = (eventData.event?.clientX || bbox.left + bbox.width / 2);
-        const ey = (eventData.event?.clientY || bbox.top);
-        tooltip.style.left = (ex + 15) + 'px';
-        tooltip.style.top = (ey - 10 + window.scrollY) + 'px';
-        // Keep tooltip on screen
-        const tr = tooltip.getBoundingClientRect();
-        if (tr.right > window.innerWidth - 5) tooltip.style.left = (ex - tr.width - 15) + 'px';
-      });
-
-      chartEl.on('plotly_unhover', function() {
-        tooltip.style.display = 'none';
-      });
     });
 
     renderUserTable(data, obsSource);
