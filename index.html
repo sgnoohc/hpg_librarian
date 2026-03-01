@@ -522,7 +522,7 @@ tr:nth-child(even) { background: var(--table-stripe); }
           mode: 'none',
           stackgroup: 'one',
           line: { width: 0, shape: useSnapshot ? 'hv' : 'linear' },
-          hoverinfo: 'skip',
+          hovertemplate: ' <extra> </extra>',
           _maxVal: maxVal,
         };
       }).filter(Boolean);
@@ -556,7 +556,7 @@ tr:nth-child(even) { background: var(--table-stripe); }
       }] : [];
       const layout = {
         title: { text: niceName + ' (' + currentTab + ', ' + modeLabel + ')', font: { size: 14, color: colors.text } },
-        hovermode: 'x',
+        hovermode: 'closest',
         showlegend: true,
         legend: { font: { size: 10, color: colors.text }, bgcolor: 'rgba(0,0,0,0)' },
         margin: { l: 50, r: 20, t: 40, b: 50 },
