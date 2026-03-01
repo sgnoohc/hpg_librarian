@@ -334,6 +334,8 @@ tr:nth-child(even) { background: var(--table-stripe); }
   const modeAvgBtn = document.getElementById('mode-averaged');
   const modeSnapBtn = document.getElementById('mode-snapshot');
 
+  const SNAPSHOT_MAX_HOURS = 72;
+
   function updateModeButtons() {
     if (snapshotMode) {
       modeSnapBtn.classList.add('active');
@@ -342,6 +344,23 @@ tr:nth-child(even) { background: var(--table-stripe); }
       modeAvgBtn.classList.add('active');
       modeSnapBtn.classList.remove('active');
     }
+    // Disable range buttons beyond 3d in snapshot mode
+    rangeBtns.forEach(b => {
+      const h = parseInt(b.dataset.hours);
+      if (h > SNAPSHOT_MAX_HOURS) {
+        b.disabled = snapshotMode;
+        b.style.opacity = snapshotMode ? '0.35' : '';
+        b.style.pointerEvents = snapshotMode ? 'none' : '';
+        if (snapshotMode && b.classList.contains('active')) {
+          b.classList.remove('active');
+        }
+      }
+    });
+    // Disable custom date inputs in snapshot mode
+    document.getElementById('date-start').disabled = snapshotMode;
+    document.getElementById('date-end').disabled = snapshotMode;
+    document.getElementById('date-apply').disabled = snapshotMode;
+    document.getElementById('date-apply').style.opacity = snapshotMode ? '0.35' : '';
   }
   updateModeButtons();
 
@@ -355,6 +374,17 @@ tr:nth-child(even) { background: var(--table-stripe); }
   modeSnapBtn.addEventListener('click', () => {
     snapshotMode = true;
     localStorage.setItem('snapshotMode', 'true');
+    // Clamp time range to 3d max
+    if (currentHours > SNAPSHOT_MAX_HOURS || customStart || customEnd) {
+      currentHours = SNAPSHOT_MAX_HOURS;
+      customStart = null;
+      customEnd = null;
+      document.getElementById('date-start').value = '';
+      document.getElementById('date-end').value = '';
+      rangeBtns.forEach(x => x.classList.remove('active'));
+      const btn3d = document.querySelector('.range-btn[data-hours="72"]');
+      if (btn3d) btn3d.classList.add('active');
+    }
     updateModeButtons();
     renderQoS();
   });
