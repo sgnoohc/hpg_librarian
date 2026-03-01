@@ -171,6 +171,32 @@ for i in range(nbins):
             user_sum = res.sum()
             d[active_user][observable][i] = user_sum
 
+# ---- Event-driven snapshot computation ----
+# Collect all unique event timestamps (job starts + ends) within the time window
+events = set()
+events.update(df["Start"].tolist())
+events.update(df["End"].tolist())
+snapshot_from_time = to_time - 3600 * 24 * 3  # last 3 days only
+snapshot_time_idxs = sorted([t for t in events if snapshot_from_time <= t <= to_time])
+
+# Initialize snapshot data structure
+d_snapshot = {}
+for user in users:
+    d_snapshot[user] = {}
+    for observable in observables:
+        d_snapshot[user][observable] = [0] * len(snapshot_time_idxs)
+
+# At each event timestamp, snapshot what's running per user
+for i, t in enumerate(snapshot_time_idxs):
+    df_snapshot = df.loc[(df.Start <= t) & (df.End > t)]
+    active_users = df_snapshot["User"].unique()
+    for active_user in active_users:
+        if active_user not in d_snapshot:
+            continue
+        df_user = df_snapshot[df_snapshot["User"] == active_user]
+        for observable in observables:
+            d_snapshot[active_user][observable][i] = df_user[observable].sum()
+
 dfs = []
 for observable in observables:
     data = {}
@@ -227,6 +253,18 @@ for observable in observables:
     for user in users:
         json_observables[shortnames[observable]][user] = [round(v, 2) for v in d[user][observable]]
 
+# Build snapshot JSON arrays
+json_snapshot_time_idxs = [
+    datetime.datetime.fromtimestamp(t, tz=eastern_timezone).strftime('%Y-%m-%dT%H:%M:%S%z')
+    for t in snapshot_time_idxs
+]
+
+json_observables_snapshot = {}
+for observable in observables:
+    json_observables_snapshot[shortnames[observable]] = {}
+    for user in users:
+        json_observables_snapshot[shortnames[observable]][user] = [round(float(v), 2) for v in d_snapshot[user][observable]]
+
 json_data = {
     "metadata": {
         "qos": qos,
@@ -234,8 +272,10 @@ json_data = {
         "time_resolution_seconds": time_res,
     },
     "time_idxs": json_time_idxs,
+    "time_idxs_snapshot": json_snapshot_time_idxs,
     "users": users,
     "observables": json_observables,
+    "observables_snapshot": json_observables_snapshot,
     "thresholds": {shortnames[k]: v for k, v in thresholds.items()},
     "nice_names": {shortnames[k]: v for k, v in nicenames.items()},
 }

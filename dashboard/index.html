@@ -137,6 +137,21 @@ body {
   cursor: pointer;
   font-size: 0.82rem;
 }
+.mode-toggle {
+  padding: 5px 14px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+.mode-toggle.active {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
 .separator {
   width: 1px;
   height: 20px;
@@ -217,6 +232,10 @@ tr:nth-child(even) { background: var(--table-stripe); }
     <input type="datetime-local" class="date-input" id="date-end">
     <button class="date-apply" id="date-apply">Apply</button>
     <button class="date-reset" id="date-reset">Reset</button>
+    <div class="separator"></div>
+    <label>Mode:</label>
+    <button class="mode-toggle active" id="mode-averaged" title="Resources are averaged over fixed 1-hour bins. Covers the full 30-day window.">Averaged</button>
+    <button class="mode-toggle" id="mode-snapshot" title="Exact resource usage sampled at every job start/end event. Higher fidelity but limited to the last 3 days.">Snapshot</button>
   </div>
   <div class="grid">
     <div class="chart-container"><div id="chart-NCPUS" class="chart-box"></div></div>
@@ -257,6 +276,7 @@ tr:nth-child(even) { background: var(--table-stripe); }
   let customStart = null;
   let customEnd = null;
   let cache = {};
+  let snapshotMode = localStorage.getItem('snapshotMode') === 'true';
   let darkMode = localStorage.getItem('darkMode') === 'true';
 
   if (darkMode) document.documentElement.setAttribute('data-theme', 'dark');
@@ -307,6 +327,65 @@ tr:nth-child(even) { background: var(--table-stripe); }
     rangeBtns.forEach(x => x.classList.remove('active'));
     document.querySelector('.range-btn[data-hours="720"]').classList.add('active');
     currentHours = 720;
+    renderQoS();
+  });
+
+  // Snapshot / Averaged toggle
+  const modeAvgBtn = document.getElementById('mode-averaged');
+  const modeSnapBtn = document.getElementById('mode-snapshot');
+
+  const SNAPSHOT_MAX_HOURS = 72;
+
+  function updateModeButtons() {
+    if (snapshotMode) {
+      modeSnapBtn.classList.add('active');
+      modeAvgBtn.classList.remove('active');
+    } else {
+      modeAvgBtn.classList.add('active');
+      modeSnapBtn.classList.remove('active');
+    }
+    // Disable range buttons beyond 3d in snapshot mode
+    rangeBtns.forEach(b => {
+      const h = parseInt(b.dataset.hours);
+      if (h > SNAPSHOT_MAX_HOURS) {
+        b.disabled = snapshotMode;
+        b.style.opacity = snapshotMode ? '0.35' : '';
+        b.style.pointerEvents = snapshotMode ? 'none' : '';
+        if (snapshotMode && b.classList.contains('active')) {
+          b.classList.remove('active');
+        }
+      }
+    });
+    // Disable custom date inputs in snapshot mode
+    document.getElementById('date-start').disabled = snapshotMode;
+    document.getElementById('date-end').disabled = snapshotMode;
+    document.getElementById('date-apply').disabled = snapshotMode;
+    document.getElementById('date-apply').style.opacity = snapshotMode ? '0.35' : '';
+  }
+  updateModeButtons();
+
+  modeAvgBtn.addEventListener('click', () => {
+    snapshotMode = false;
+    localStorage.setItem('snapshotMode', 'false');
+    updateModeButtons();
+    renderQoS();
+  });
+
+  modeSnapBtn.addEventListener('click', () => {
+    snapshotMode = true;
+    localStorage.setItem('snapshotMode', 'true');
+    // Clamp time range to 3d max
+    if (currentHours > SNAPSHOT_MAX_HOURS || customStart || customEnd) {
+      currentHours = SNAPSHOT_MAX_HOURS;
+      customStart = null;
+      customEnd = null;
+      document.getElementById('date-start').value = '';
+      document.getElementById('date-end').value = '';
+      rangeBtns.forEach(x => x.classList.remove('active'));
+      const btn3d = document.querySelector('.range-btn[data-hours="72"]');
+      if (btn3d) btn3d.classList.add('active');
+    }
+    updateModeButtons();
     renderQoS();
   });
 
@@ -384,12 +463,14 @@ tr:nth-child(even) { background: var(--table-stripe); }
     if (!data) return;
 
     const colors = getPlotColors();
-    const times = data.time_idxs;
+    const useSnapshot = snapshotMode && data.time_idxs_snapshot && data.observables_snapshot;
+    const times = useSnapshot ? data.time_idxs_snapshot : data.time_idxs;
+    const obsSource = useSnapshot ? data.observables_snapshot : data.observables;
     const { startIdx, endIdx } = filterByRange(times);
     const filteredTimes = times.slice(startIdx, endIdx);
 
     OBS_KEYS.forEach(obsKey => {
-      const obsData = data.observables[obsKey];
+      const obsData = obsSource[obsKey];
       if (!obsData) return;
 
       const traces = data.users.map(user => {
@@ -402,7 +483,7 @@ tr:nth-child(even) { background: var(--table-stripe); }
           type: 'scatter',
           mode: 'none',
           stackgroup: 'one',
-          line: { width: 0 },
+          line: { width: 0, shape: useSnapshot ? 'hv' : 'linear' },
           hovertemplate: '%{y:.1f}<extra>%{fullData.name}</extra>',
         };
       }).filter(Boolean);
@@ -422,6 +503,7 @@ tr:nth-child(even) { background: var(--table-stripe); }
       }
 
       const niceName = data.nice_names[obsKey] || obsKey;
+      const modeLabel = useSnapshot ? 'snapshot' : 'averaged';
       const thresholdAnnotation = (threshold && threshold > 0) ? [{
         x: filteredTimes[filteredTimes.length - 1],
         y: threshold,
@@ -432,7 +514,7 @@ tr:nth-child(even) { background: var(--table-stripe); }
         yanchor: 'bottom',
       }] : [];
       const layout = {
-        title: { text: niceName + ' (' + currentTab + ')', font: { size: 14, color: colors.text } },
+        title: { text: niceName + ' (' + currentTab + ', ' + modeLabel + ')', font: { size: 14, color: colors.text } },
         hovermode: 'x unified',
         showlegend: true,
         legend: { font: { size: 10, color: colors.text }, bgcolor: 'rgba(0,0,0,0)' },
@@ -448,20 +530,20 @@ tr:nth-child(even) { background: var(--table-stripe); }
       Plotly.react('chart-' + obsKey, traces, layout, { responsive: true, displayModeBar: true });
     });
 
-    renderUserTable(data, startIdx);
-    renderTotalTable(data, startIdx, endIdx);
+    renderUserTable(data, obsSource);
+    renderTotalTable(data, obsSource, times, startIdx, endIdx, useSnapshot);
   }
 
-  function renderUserTable(data, startIdx) {
+  function renderUserTable(data, obsSource) {
     const tbody = document.querySelector('#user-table tbody');
     tbody.innerHTML = '';
 
     const rows = [];
     data.users.forEach(user => {
-      const cpus = lastVal(data.observables.NCPUS, user);
-      const gpus = lastVal(data.observables.NGPUS, user);
-      const mem = lastVal(data.observables.MEMORY, user);
-      const jobs = lastVal(data.observables.NJOBS, user);
+      const cpus = lastVal(obsSource.NCPUS, user);
+      const gpus = lastVal(obsSource.NGPUS, user);
+      const mem = lastVal(obsSource.MEMORY, user);
+      const jobs = lastVal(obsSource.NJOBS, user);
       const total = cpus + gpus * 10 + mem + jobs;
       if (total > 0) rows.push({ user, cpus, gpus, mem, jobs, total });
     });
@@ -484,19 +566,35 @@ tr:nth-child(even) { background: var(--table-stripe); }
     return 0;
   }
 
-  function renderTotalTable(data, startIdx, endIdx) {
+  function renderTotalTable(data, obsSource, times, startIdx, endIdx, useSnapshot) {
     const tbody = document.querySelector('#total-table tbody');
     tbody.innerHTML = '';
-    const binHours = data.metadata.time_resolution_seconds / 3600;
+
+    // Precompute durations (in hours) for each time point in the visible range
+    let durations = [];
+    if (useSnapshot) {
+      // Variable intervals: duration[i] = time[i+1] - time[i], last point gets 0
+      for (let i = startIdx; i < endIdx; i++) {
+        if (i + 1 < times.length) {
+          const dt = (new Date(times[i + 1]) - new Date(times[i])) / 3600000;
+          durations.push(dt);
+        } else {
+          durations.push(0);
+        }
+      }
+    } else {
+      const binHours = data.metadata.time_resolution_seconds / 3600;
+      for (let i = startIdx; i < endIdx; i++) durations.push(binHours);
+    }
 
     const rows = [];
     data.users.forEach(user => {
       const sum = (obsKey) => {
-        const arr = data.observables[obsKey] && data.observables[obsKey][user];
+        const arr = obsSource[obsKey] && obsSource[obsKey][user];
         if (!arr) return 0;
         let s = 0;
-        for (let i = startIdx; i < endIdx; i++) s += arr[i];
-        return s * binHours;
+        for (let i = startIdx; i < endIdx; i++) s += arr[i] * durations[i - startIdx];
+        return s;
       };
       const cpuH = sum('NCPUS');
       const gpuH = sum('NGPUS');
