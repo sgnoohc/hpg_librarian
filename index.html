@@ -479,22 +479,22 @@ tr:nth-child(even) { background: var(--table-stripe); }
         if (!vals) return null;
         const sliced = vals.slice(startIdx, endIdx);
         const maxVal = Math.max(...sliced);
-        if (maxVal === 0) return null; // skip users with all zeros
-        // Per-point hovertemplate: hide zero entries from unified hover
-        const htpl = sliced.map(v => v > 0 ? '%{y:.1f}<extra>%{fullData.name}</extra>' : '<extra></extra>');
+        if (maxVal === 0) return null; // skip users with all zeros in range
+        // Replace zeros with null so they are hidden from unified hover
+        const yvals = sliced.map(v => v > 0 ? v : null);
         return {
           x: filteredTimes,
-          y: sliced,
+          y: yvals,
           name: user,
           type: 'scatter',
           mode: 'none',
           stackgroup: 'one',
           line: { width: 0, shape: useSnapshot ? 'hv' : 'linear' },
-          hovertemplate: htpl,
+          hovertemplate: '%{y:.1f}<extra>%{fullData.name}</extra>',
           _maxVal: maxVal,
         };
       }).filter(Boolean);
-      // Sort traces so largest users are stacked on top (and appear first in hover)
+      // Sort: largest last so they appear first in unified hover (reverse trace order)
       traces.sort((a, b) => a._maxVal - b._maxVal);
 
       const threshold = data.thresholds[obsKey];
