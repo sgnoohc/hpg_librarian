@@ -234,6 +234,20 @@ tr:nth-child(even) { background: var(--table-stripe); }
     <button class="date-apply" id="date-apply">Apply</button>
     <button class="date-reset" id="date-reset">Reset</button>
     <div class="separator"></div>
+    <label>Timezone:</label>
+    <select class="date-input" id="tz-select">
+      <option value="local">Local (browser)</option>
+      <option value="America/New_York">US Eastern</option>
+      <option value="America/Chicago">US Central</option>
+      <option value="America/Denver">US Mountain</option>
+      <option value="America/Los_Angeles">US Pacific</option>
+      <option value="UTC">UTC</option>
+      <option value="Europe/London">London</option>
+      <option value="Europe/Paris">Paris/Berlin</option>
+      <option value="Asia/Shanghai">China</option>
+      <option value="Asia/Tokyo">Tokyo</option>
+    </select>
+    <div class="separator"></div>
     <label>Mode:</label>
     <button class="mode-toggle active" id="mode-averaged" title="Resources are averaged over fixed 1-hour bins. Covers the full 30-day window.">Averaged</button>
     <button class="mode-toggle" id="mode-snapshot" title="Exact resource usage sampled at every job start/end event. Higher fidelity but limited to the last 3 days.">Snapshot</button>
@@ -279,6 +293,7 @@ tr:nth-child(even) { background: var(--table-stripe); }
   let cache = {};
   let snapshotMode = localStorage.getItem('snapshotMode') === 'true';
   let darkMode = localStorage.getItem('darkMode') === 'true';
+  let currentTZ = localStorage.getItem('displayTZ') || 'local';
 
   if (darkMode) document.documentElement.setAttribute('data-theme', 'dark');
 
@@ -390,6 +405,43 @@ tr:nth-child(even) { background: var(--table-stripe); }
     renderQoS();
   });
 
+  // Timezone selector
+  const tzSelect = document.getElementById('tz-select');
+  tzSelect.value = currentTZ;
+  // Cache one formatter per timezone (formatting every timestamp is hot)
+  const tzFormatters = {};
+  function getTZFormatter(tz) {
+    if (!tzFormatters[tz]) {
+      const opts = {
+        hour12: false,
+        year: 'numeric', month: '2-digit', day: '2-digit',
+        hour: '2-digit', minute: '2-digit', second: '2-digit',
+      };
+      if (tz !== 'local') opts.timeZone = tz;
+      tzFormatters[tz] = new Intl.DateTimeFormat('en-CA', opts);
+    }
+    return tzFormatters[tz];
+  }
+  // Convert an array of absolute ISO timestamps into naive wall-clock strings
+  // in the selected timezone, which Plotly plots literally (no further shifting).
+  function toZonedTimes(times) {
+    if (!times) return times;
+    const fmt = getTZFormatter(currentTZ);
+    return times.map(t => {
+      const parts = fmt.formatToParts(new Date(t));
+      const o = {};
+      parts.forEach(p => { o[p.type] = p.value; });
+      const hour = o.hour === '24' ? '00' : o.hour;
+      return o.year + '-' + o.month + '-' + o.day + 'T' + hour + ':' + o.minute + ':' + o.second;
+    });
+  }
+
+  tzSelect.addEventListener('change', () => {
+    currentTZ = tzSelect.value;
+    localStorage.setItem('displayTZ', currentTZ);
+    renderQoS();
+  });
+
   // Dark mode
   darkToggle.addEventListener('click', () => {
     darkMode = !darkMode;
@@ -468,7 +520,8 @@ tr:nth-child(even) { background: var(--table-stripe); }
     const times = useSnapshot ? data.time_idxs_snapshot : data.time_idxs;
     const obsSource = useSnapshot ? data.observables_snapshot : data.observables;
     const { startIdx, endIdx } = filterByRange(times);
-    const filteredTimes = times.slice(startIdx, endIdx);
+    // Filtering uses absolute times; display uses timezone-converted wall-clock.
+    const filteredTimes = toZonedTimes(times.slice(startIdx, endIdx));
 
     OBS_KEYS.forEach(obsKey => {
       const obsData = obsSource[obsKey];
@@ -530,7 +583,7 @@ tr:nth-child(even) { background: var(--table-stripe); }
         margin: { l: 50, r: 20, t: 40, b: 50 },
         paper_bgcolor: colors.bg,
         plot_bgcolor: colors.bg,
-        xaxis: { gridcolor: colors.grid, tickfont: { color: colors.text } },
+        xaxis: { gridcolor: colors.grid, tickfont: { color: colors.text }, title: { text: 'Time (' + (tzSelect.options[tzSelect.selectedIndex] ? tzSelect.options[tzSelect.selectedIndex].text : currentTZ) + ')', font: { size: 10, color: colors.text } } },
         yaxis: { gridcolor: colors.grid, tickfont: { color: colors.text }, title: { text: niceName, font: { color: colors.text } }, rangemode: 'tozero' },
         shapes: shapes,
         annotations: thresholdAnnotation,
