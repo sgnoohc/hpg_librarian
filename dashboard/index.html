@@ -214,6 +214,8 @@ tr:nth-child(even) { background: var(--table-stripe); }
 <div class="tabs">
   <button class="tab active" data-tab="avery">avery</button>
   <button class="tab" data-tab="avery-b">avery-b</button>
+  <button class="tab" data-tab="p.chang">p.chang</button>
+  <button class="tab" data-tab="p.chang-b">p.chang-b</button>
 </div>
 
 <div id="qos-section">
@@ -282,6 +284,8 @@ tr:nth-child(even) { background: var(--table-stripe); }
   const DATA_FILES = {
     'avery': 'data_avery.json',
     'avery-b': 'data_avery-b.json',
+    'p.chang': 'data_p.chang.json',
+    'p.chang-b': 'data_p.chang-b.json',
   };
   const REFRESH_MS = 5 * 60 * 1000;
   const OBS_KEYS = ['NCPUS', 'NGPUS', 'MEMORY', 'NJOBS'];
@@ -473,15 +477,17 @@ tr:nth-child(even) { background: var(--table-stripe); }
 
   async function loadData() {
     try {
-      const [avery, averyb] = await Promise.all([
-        fetchJSON(DATA_FILES['avery']),
-        fetchJSON(DATA_FILES['avery-b']),
-      ]);
-      cache['avery'] = avery;
-      cache['avery-b'] = averyb;
+      const keys = Object.keys(DATA_FILES);
+      // Tolerate a missing/not-yet-deployed file: that tab just stays empty
+      // instead of blanking the whole dashboard.
+      const results = await Promise.all(keys.map(k =>
+        fetchJSON(DATA_FILES[k]).catch(e => { console.error(e); return null; })
+      ));
+      keys.forEach((k, i) => { if (results[i]) cache[k] = results[i]; });
       statusBar.textContent = 'Data loaded at ' + new Date().toLocaleTimeString();
-      if (avery.metadata.last_updated) {
-        lastUpdatedEl.textContent = 'Updated: ' + avery.metadata.last_updated;
+      const meta = cache[currentTab] && cache[currentTab].metadata;
+      if (meta && meta.last_updated) {
+        lastUpdatedEl.textContent = 'Updated: ' + meta.last_updated;
       }
     } catch (e) {
       statusBar.textContent = 'Error loading data: ' + e.message;
@@ -514,6 +520,10 @@ tr:nth-child(even) { background: var(--table-stripe); }
   function renderQoS() {
     const data = cache[currentTab];
     if (!data) return;
+
+    if (data.metadata && data.metadata.last_updated) {
+      lastUpdatedEl.textContent = 'Updated: ' + data.metadata.last_updated;
+    }
 
     const colors = getPlotColors();
     const useSnapshot = snapshotMode && data.time_idxs_snapshot && data.observables_snapshot;

@@ -13,6 +13,9 @@ WORKTREE_DIR="/tmp/librarian-gh-pages-$$"
 cleanup() { git worktree remove --force "$WORKTREE_DIR" 2>/dev/null || rm -rf "$WORKTREE_DIR"; }
 trap cleanup EXIT
 
+# Prune stale worktrees from prior crashed runs
+git worktree prune
+
 # Fetch latest gh-pages
 git fetch origin gh-pages 2>/dev/null || true
 
@@ -32,6 +35,13 @@ git worktree add "$WORKTREE_DIR" gh-pages 2>/dev/null || {
 cp "$DIR/dashboard/index.html" "$WORKTREE_DIR/"
 cp "$DIR/data_avery.json" "$WORKTREE_DIR/" 2>/dev/null || true
 cp "$DIR/data_avery-b.json" "$WORKTREE_DIR/" 2>/dev/null || true
+cp "$DIR/data_p.chang.json" "$WORKTREE_DIR/" 2>/dev/null || true
+cp "$DIR/data_p.chang-b.json" "$WORKTREE_DIR/" 2>/dev/null || true
+
+# Ship the Pages deploy workflow onto the gh-pages branch so pushing here
+# triggers it (workflows fire from the branch that receives the push).
+mkdir -p "$WORKTREE_DIR/.github/workflows"
+cp "$DIR/.github/workflows/deploy-pages.yml" "$WORKTREE_DIR/.github/workflows/"
 
 # Commit and push
 cd "$WORKTREE_DIR"

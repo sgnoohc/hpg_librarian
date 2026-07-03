@@ -14,7 +14,9 @@ import pytz
 qos = "avery"
 
 if len(sys.argv) > 1:
-    qos = "avery-b"
+    arg = sys.argv[1]
+    # Backward compatible: bare "2" still selects the avery burst QoS.
+    qos = "avery-b" if arg == "2" else arg
 
 #----------------------------------------
 # Configuration
@@ -46,12 +48,16 @@ observables = [
         "ReqMem",
         "NNodes",
         ]
-thresholds = {
-        "NCPUS" : 430 if qos == "avery" else 3870,
-        "NGPUS" : 39 if qos == "avery" else 0,
-        "ReqMem" : 3359 if qos == "avery" else 30234,
-        "NNodes": 0,
+# Per-QoS resource limits (threshold lines drawn on the plots).
+# ReqMem is in GB to match the computed ReqMem column below.
+qos_thresholds = {
+        "avery"     : {"NCPUS": 430,  "NGPUS": 39, "ReqMem": 3359,  "NNodes": 0},
+        "avery-b"   : {"NCPUS": 3870, "NGPUS": 0,  "ReqMem": 30234, "NNodes": 0},
+        "p.chang"   : {"NCPUS": 16,   "NGPUS": 9,  "ReqMem": 125,   "NNodes": 0},
+        "p.chang-b" : {"NCPUS": 144,  "NGPUS": 0,  "ReqMem": 1125,  "NNodes": 0},
         }
+# Unknown QoS: no threshold lines (all zeros).
+thresholds = qos_thresholds.get(qos, {"NCPUS": 0, "NGPUS": 0, "ReqMem": 0, "NNodes": 0})
 nicenames = {
         "NCPUS" : "# of CPUs",
         "NGPUS" : "# of GPUs",
