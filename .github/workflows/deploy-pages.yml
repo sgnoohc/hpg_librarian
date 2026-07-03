@@ -1,0 +1,68 @@
+name: Deploy dashboard to GitHub Pages
+
+# The data-refresh cron (run.sh, every 10 min) pushes freshly generated
+# JSON + index.html to the gh-pages branch via deploy_pages.sh. This workflow
+# publishes that content through the GitHub Actions Pages pipeline.
+on:
+  push:
+    branches: [gh-pages]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One Pages deployment at a time. A newer push cancels an in-flight run so we
+# always publish the latest data and never pile up a queue. A cancelled run is
+# not reported as a failure (no notification email).
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy1.outputs.page_url || steps.deploy2.outputs.page_url || steps.deploy3.outputs.page_url }}
+    steps:
+      - name: Checkout gh-pages content
+        uses: actions/checkout@v4
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload site artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: .
+
+      # The Pages deploy step intermittently returns a transient
+      # "Deployment failed, try again later." Retry up to 3 times so a flaky
+      # backend response doesn't fail the whole run (and email us). Only the
+      # final attempt is allowed to fail the job.
+      - name: Deploy to GitHub Pages (attempt 1)
+        id: deploy1
+        continue-on-error: true
+        uses: actions/deploy-pages@v4
+
+      - name: Wait before retry
+        if: steps.deploy1.outcome == 'failure'
+        run: sleep 30
+
+      - name: Deploy to GitHub Pages (attempt 2)
+        id: deploy2
+        if: steps.deploy1.outcome == 'failure'
+        continue-on-error: true
+        uses: actions/deploy-pages@v4
+
+      - name: Wait before final retry
+        if: steps.deploy1.outcome == 'failure' && steps.deploy2.outcome == 'failure'
+        run: sleep 60
+
+      - name: Deploy to GitHub Pages (attempt 3)
+        id: deploy3
+        if: steps.deploy1.outcome == 'failure' && steps.deploy2.outcome == 'failure'
+        uses: actions/deploy-pages@v4
