@@ -60,7 +60,7 @@ Update the thresholds to match your group's allocation limits:
 ```python
 thresholds = {
     "NCPUS" : 430 if qos == "avery" else 3870,
-    "NGPUS" : 39 if qos == "avery" else 0,
+    "NGPUS" : 34 if qos == "avery" else 0,
     "ReqMem" : 3359 if qos == "avery" else 30234,
     "NNodes": 0,
 }

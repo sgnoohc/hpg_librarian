@@ -51,7 +51,7 @@ observables = [
 # Per-QoS resource limits (threshold lines drawn on the plots).
 # ReqMem is in GB to match the computed ReqMem column below.
 qos_thresholds = {
-        "avery"     : {"NCPUS": 430,  "NGPUS": 39, "ReqMem": 3359,  "NNodes": 0},
+        "avery"     : {"NCPUS": 430,  "NGPUS": 34, "ReqMem": 3359,  "NNodes": 0},
         "avery-b"   : {"NCPUS": 3870, "NGPUS": 0,  "ReqMem": 30234, "NNodes": 0},
         "p.chang"   : {"NCPUS": 16,   "NGPUS": 9,  "ReqMem": 125,   "NNodes": 0},
         "p.chang-b" : {"NCPUS": 144,  "NGPUS": 0,  "ReqMem": 1125,  "NNodes": 0},
