@@ -37,6 +37,8 @@ cp "$DIR/data_avery.json" "$WORKTREE_DIR/" 2>/dev/null || true
 cp "$DIR/data_avery-b.json" "$WORKTREE_DIR/" 2>/dev/null || true
 cp "$DIR/data_p.chang.json" "$WORKTREE_DIR/" 2>/dev/null || true
 cp "$DIR/data_p.chang-b.json" "$WORKTREE_DIR/" 2>/dev/null || true
+mkdir -p "$WORKTREE_DIR/gpu_usage"
+cp "$DIR"/gpu_usage/*.csv "$WORKTREE_DIR/gpu_usage/" 2>/dev/null || true
 
 # Ship the Pages deploy workflow onto the gh-pages branch so pushing here
 # triggers it (workflows fire from the branch that receives the push).

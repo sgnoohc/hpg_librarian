@@ -10,6 +10,10 @@ module load python3
 ./parse.py 2
 ./parse.py p.chang
 ./parse.py p.chang-b
+# Permanent monthly GPU log (Slurm purges jobs after ~6 months); refresh every 6h.
+if [ -z "$(find gpu_usage/gpu_monthly.csv -mmin -360 2>/dev/null)" ]; then
+    ./gpu_monthly.py >> $HOME/scron/logs/gpu_monthly.log 2>&1
+fi
 module reset
 
 scp *_avery.{pdf,png} uaf-10:~/public_html/hpg/usage/

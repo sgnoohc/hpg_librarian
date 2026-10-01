@@ -178,8 +178,30 @@ tail ~/scron/logs/watchdog.log
 | `parse.py` | Queries sacct, bins resource usage, generates plots + JSON |
 | `run.sh` | Main pipeline: runs parse, SCPs files, deploys to GitHub Pages |
 | `deploy_pages.sh` | Pushes dashboard + JSON to gh-pages branch |
+| `gpu_monthly.py` | Permanent monthly GPU log (total + per user) in `gpu_usage/`, refreshed every 6h by `run.sh` |
 | `watchdog.sh` | Monitors and recovers stuck scrontab jobs |
 | `dashboard/index.html` | Self-contained interactive Plotly.js dashboard |
+
+## Monthly GPU Usage Log
+
+Slurm purges job records after ~6 months and the dashboard only shows 30 days, so
+`gpu_monthly.py` keeps a permanent per-month record for arguing GPU allocation:
+
+- `gpu_usage/gpu_monthly.csv`: per month: GPU limit, GPU-hours, average and peak
+  GPUs in use, hours spent at the QoS GPU limit, GPU-hours jobs spent queued,
+  job/user counts, and whether the month's data is `complete`.
+- `gpu_usage/gpu_monthly_by_user.csv`: GPU-hours, queued GPU-hours and job count per
+  user and GPU type.
+
+`run.sh` recomputes the current and previous month every 6 hours; older rows are
+never touched, and a complete month is never overwritten by purge-truncated data.
+Both CSVs are also published to GitHub Pages under `gpu_usage/`.
+
+```bash
+./gpu_monthly.py                      # current + previous month
+./gpu_monthly.py 2026-04 2026-05      # backfill specific months (only ~6 months exist in Slurm)
+./gpu_monthly.py --qos avery,p.chang  # other QoS
+```
 
 ## Tuning
 
