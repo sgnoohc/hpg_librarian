@@ -21,6 +21,7 @@ scp *_avery-b.{pdf,png} uaf-10:~/public_html/hpg/usage_burst/
 
 scp data_avery.json data_avery-b.json data_p.chang.json data_p.chang-b.json uaf-10:~/public_html/hpg/usage/
 scp dashboard/index.html uaf-10:~/public_html/hpg/usage/
+scp -r gpu_usage uaf-10:~/public_html/hpg/usage/
 
 # Deploy to GitHub Pages
 module load git
