@@ -194,6 +194,9 @@ th, td {
 }
 th { font-weight: 600; background: var(--bg-secondary); }
 tr:nth-child(even) { background: var(--table-stripe); }
+.monthly-head { padding-bottom: 0; }
+.monthly-note { font-size: 0.8rem; color: var(--text-secondary); }
+#monthly-table td:not(:first-child), #monthly-table th:not(:first-child) { text-align: right; font-variant-numeric: tabular-nums; }
 .status-bar {
   padding: 4px 24px;
   font-size: 0.78rem;
@@ -260,6 +263,22 @@ tr:nth-child(even) { background: var(--table-stripe); }
     <div class="chart-container"><div id="chart-MEMORY" class="chart-box"></div></div>
     <div class="chart-container"><div id="chart-NJOBS" class="chart-box"></div></div>
   </div>
+  <div id="monthly-section" style="display:none">
+    <div class="table-section monthly-head">
+      <h2 id="monthly-title">Monthly GPU Usage</h2>
+      <p class="monthly-note">Permanent monthly log from <code>gpu_monthly.py</code> (Slurm purges job records after ~6 months). * = partial month.</p>
+    </div>
+    <div class="grid">
+      <div class="chart-container"><div id="chart-monthly-gpuh" class="chart-box"></div></div>
+      <div class="chart-container"><div id="chart-monthly-limit" class="chart-box"></div></div>
+    </div>
+    <div class="table-section">
+      <table id="monthly-table">
+        <thead><tr><th>Month</th><th>GPU-hours</th><th>Avg GPUs in use</th><th>% of limit</th><th>Peak GPUs</th><th>Hours at limit</th><th>Queued GPU-hours</th><th>GPU users</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
   <div class="table-section">
     <h2>Current User Usage (Last Time Bin)</h2>
     <table id="user-table">
@@ -295,6 +314,7 @@ tr:nth-child(even) { background: var(--table-stripe); }
   let customStart = null;
   let customEnd = null;
   let cache = {};
+  let monthly = null;
   let snapshotMode = localStorage.getItem('snapshotMode') === 'true';
   let darkMode = localStorage.getItem('darkMode') === 'true';
   let currentTZ = localStorage.getItem('displayTZ') || 'local';
@@ -475,6 +495,17 @@ tr:nth-child(even) { background: var(--table-stripe); }
     return resp.json();
   }
 
+  async function fetchCSV(url) {
+    const resp = await fetch(url + '?t=' + Date.now());
+    if (!resp.ok) throw new Error('Failed to fetch ' + url + ': ' + resp.status);
+    const [header, ...lines] = (await resp.text()).trim().split('\n');
+    const cols = header.split(',');
+    return lines.map(l => {
+      const vals = l.split(',');
+      return Object.fromEntries(cols.map((c, i) => [c, vals[i]]));
+    });
+  }
+
   async function loadData() {
     try {
       const keys = Object.keys(DATA_FILES);
@@ -484,6 +515,11 @@ tr:nth-child(even) { background: var(--table-stripe); }
         fetchJSON(DATA_FILES[k]).catch(e => { console.error(e); return null; })
       ));
       keys.forEach((k, i) => { if (results[i]) cache[k] = results[i]; });
+      const [summary, byUser] = await Promise.all([
+        fetchCSV('gpu_usage/gpu_monthly.csv'),
+        fetchCSV('gpu_usage/gpu_monthly_by_user.csv'),
+      ]).catch(e => { console.error(e); return [null, null]; });
+      if (summary && byUser) monthly = { summary, byUser };
       statusBar.textContent = 'Data loaded at ' + new Date().toLocaleTimeString();
       const meta = cache[currentTab] && cache[currentTab].metadata;
       if (meta && meta.last_updated) {
@@ -604,6 +640,122 @@ tr:nth-child(even) { background: var(--table-stripe); }
 
     renderUserTable(data, obsSource);
     renderTotalTable(data, obsSource, times, startIdx, endIdx, useSnapshot);
+    renderMonthly(colors);
+  }
+
+  // Validated categorical palette (fixed order; light / dark steps). Slot is
+  // assigned by all-time GPU-hours rank so a user keeps one color in every month.
+  const SERIES_LIGHT = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#008300', '#4a3aa7'];
+  const SERIES_DARK  = ['#3987e5', '#d95926', '#199e70', '#c98500', '#d55181', '#008300', '#9085e9'];
+  const OTHER_COLOR = { light: '#a3a29c', dark: '#6b6a64' };
+
+  function renderMonthly(colors) {
+    const section = document.getElementById('monthly-section');
+    const rows = monthly ? monthly.summary.filter(r => r.qos === currentTab) : [];
+    if (!rows.length) { section.style.display = 'none'; return; }
+    section.style.display = '';
+    document.getElementById('monthly-title').textContent = 'Monthly GPU Usage (' + currentTab + ')';
+
+    const dark = document.documentElement.getAttribute('data-theme') === 'dark';
+    const series = dark ? SERIES_DARK : SERIES_LIGHT;
+    const other = dark ? OTHER_COLOR.dark : OTHER_COLOR.light;
+    const fmtMonth = r => {
+      const [y, m] = r.month.split('-').map(Number);
+      const label = new Date(y, m - 1, 1).toLocaleString('en-US', { month: 'short', year: 'numeric' });
+      return r.complete === '1' ? label : label + '*';
+    };
+    const months = rows.map(r => r.month);
+    const labels = rows.map(fmtMonth);
+
+    // Per-user GPU-hours per month (summed over GPU types); top 7 by all-time total, rest -> Other.
+    const perUser = {};
+    monthly.byUser.filter(r => r.qos === currentTab).forEach(r => {
+      const u = perUser[r.user] = perUser[r.user] || {};
+      u[r.month] = (u[r.month] || 0) + parseFloat(r.gpu_hours);
+    });
+    const total = u => Object.values(perUser[u]).reduce((a, b) => a + b, 0);
+    const ranked = Object.keys(perUser).filter(u => total(u) > 0).sort((a, b) => total(b) - total(a));
+    const named = ranked.slice(0, series.length);
+    const rest = ranked.slice(series.length);
+
+    const barBase = {
+      type: 'bar',
+      x: labels,
+      marker: { line: { color: colors.bg, width: 1 } },  // surface gap between stacked segments
+    };
+    const traces = named.map((u, i) => ({
+      ...barBase,
+      name: u,
+      y: months.map(m => perUser[u][m] || 0),
+      marker: { ...barBase.marker, color: series[i] },
+      hovertemplate: '%{y:,.0f} GPU-h<extra>' + u + '</extra>',
+    }));
+    if (rest.length) {
+      traces.push({
+        ...barBase,
+        name: 'Other (' + rest.length + ')',
+        y: months.map(m => rest.reduce((s, u) => s + (perUser[u][m] || 0), 0)),
+        marker: { ...barBase.marker, color: other },
+        hovertemplate: '%{y:,.0f} GPU-h<extra>Other</extra>',
+      });
+    }
+    // Same unit (GPU-hours), same axis: what the allocation could have delivered.
+    // A tick per month, not a connected line, so a partial month doesn't read as a cut.
+    traces.push({
+      type: 'scatter',
+      mode: 'markers',
+      name: 'Allocation capacity',
+      x: labels,
+      y: rows.map(r => parseFloat(r.gpu_limit) * parseFloat(r.hours_covered)),
+      marker: { symbol: 'line-ew', size: 30, line: { color: colors.text, width: 2 } },
+      customdata: rows.map(r => r.gpu_limit),
+      hovertemplate: '%{y:,.0f} GPU-h (%{customdata} GPUs × hours)<extra>Capacity</extra>',
+    });
+
+    const axisBase = { gridcolor: colors.grid, tickfont: { color: colors.text } };
+    const layoutBase = {
+      hovermode: 'x unified',
+      margin: { l: 60, r: 20, t: 40, b: 50 },
+      paper_bgcolor: colors.bg,
+      plot_bgcolor: colors.bg,
+      xaxis: { ...axisBase, type: 'category' },
+      legend: { font: { size: 10, color: colors.text }, bgcolor: 'rgba(0,0,0,0)', traceorder: 'normal' },
+      bargap: 0.35,
+    };
+    Plotly.react('chart-monthly-gpuh', traces, {
+      ...layoutBase,
+      barmode: 'stack',
+      title: { text: 'GPU-hours per month by user', x: 0.02, xanchor: 'left', font: { size: 14, color: colors.text } },
+      yaxis: { ...axisBase, title: { text: 'GPU-hours', font: { color: colors.text } }, rangemode: 'tozero' },
+    }, { responsive: true, displayModeBar: true });
+
+    Plotly.react('chart-monthly-limit', [{
+      type: 'bar',
+      name: 'Hours at GPU limit',
+      x: labels,
+      y: rows.map(r => parseFloat(r.hours_at_limit)),
+      marker: { color: series[0] },
+      customdata: rows.map(r => [(100 * parseFloat(r.frac_hours_at_limit)).toFixed(1), r.gpu_limit]),
+      hovertemplate: '%{y:.1f} h at %{customdata[1]} GPUs (%{customdata[0]}% of the month)<extra></extra>',
+    }], {
+      ...layoutBase,
+      showlegend: false,
+      title: { text: 'Hours with all ' + rows[rows.length - 1].gpu_limit + ' GPUs in use', x: 0.02, xanchor: 'left', font: { size: 14, color: colors.text } },
+      yaxis: { ...axisBase, title: { text: 'Hours', font: { color: colors.text } }, rangemode: 'tozero' },
+    }, { responsive: true, displayModeBar: true });
+
+    const num = (v, d = 0) => parseFloat(v).toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d });
+    const tbody = document.querySelector('#monthly-table tbody');
+    tbody.innerHTML = '';
+    rows.slice().reverse().forEach((r, i) => {
+      const tr = document.createElement('tr');
+      const pct = r.avg_frac_of_limit === '' ? '–' : num(100 * r.avg_frac_of_limit, 1) + '%';
+      tr.innerHTML = '<td>' + labels[rows.length - 1 - i] + '</td><td>' + num(r.gpu_hours) +
+        '</td><td>' + num(r.avg_gpus_in_use, 1) + ' / ' + r.gpu_limit + '</td><td>' + pct +
+        '</td><td>' + r.peak_gpus_in_use + '</td><td>' + num(r.hours_at_limit, 1) +
+        '</td><td>' + num(r.gpu_hours_queued) + '</td><td>' + r.n_gpu_users + '</td>';
+      tbody.appendChild(tr);
+    });
   }
 
   function renderUserTable(data, obsSource) {
