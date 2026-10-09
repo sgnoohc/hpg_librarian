@@ -76,10 +76,10 @@ month,qos,user,gpu_type,gpu_hours,gpu_hours_queued,n_gpu_jobs
 2026-09,avery,llambre1.brown,b200,1.0,0.4,20
 2026-09,avery,lagray.fnal,l4,0.1,0.1,5
 2026-09,avery,tkolberg.fsu,unspecified,0.0,0.0,1
-2026-10,avery,tkolberg.fsu,l4,2192.7,1654.3,2197
+2026-10,avery,tkolberg.fsu,l4,2220.0,1676.2,2584
 2026-10,avery,lagray.fnal,b200,403.4,13.6,33
 2026-10,avery,gkehris,b200,379.2,17.8,5
-2026-10,avery,marinakolosova,l4,132.5,36.6,1046
+2026-10,avery,marinakolosova,l4,142.9,38.4,1115
 2026-10,avery,mayrasilva,b200,34.3,6.9,26
 2026-10,avery,m.mazza,l4,30.0,3.3,55
 2026-10,avery,ekoenig,l4,18.2,20.4,271
