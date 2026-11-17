@@ -22,6 +22,11 @@ Generates interactive dashboards showing CPU, GPU, memory, and job usage per use
 - Tabs to switch between QoS groups (e.g. avery, avery-b)
 - Time range presets (6h, 12h, 24h, 3d, 7d, 14d, 30d) and custom date picker
 - Current usage table (last time bin) and total usage table (CPU-hours, GPU-hours, etc.)
+- Running / Pending toggle: pending charts show resources requested by queued jobs
+  (from `Eligible` to `Start`, so dependency and `--begin` waits are excluded; job arrays
+  are counted per task), hourly-averaged over 30 days or sampled every 5 min over 3 days
+- "Pending Jobs Now" table (live `squeue`) with each user's pending reasons
+  (`QOSGrp*` = blocked by the QoS group limit; `Priority`/`Resources` = waiting on the cluster)
 - Dark mode (persisted in browser)
 - Auto-refreshes data every 5 minutes
 

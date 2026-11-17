@@ -4,7 +4,10 @@ import csv
 import time
 import sys
 import os
+import re
 import json
+import subprocess
+import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import datetime
@@ -88,6 +91,9 @@ column_headers = [
         "JobIDRaw",
         "NodeList",
         "Reason",
+        "Eligible",
+        "End",
+        "ReqCPUS",
         ]
 
 # Creating some colunm name to integer matching
@@ -106,8 +112,11 @@ df = df[~df.User.isna()] # Get rid of rows with user name NaN
 
 #print(df["Start"])
 
-df["Start"] = df["Start"].apply(lambda x : int(time.mktime(time.strptime(x, "%Y-%m-%dT%H:%M:%S"))) if x != "Unknown" and x != "None" else 0)
-df["Submit"] = df["Submit"].apply(lambda x : int(time.mktime(time.strptime(x, "%Y-%m-%dT%H:%M:%S"))) if x != "Unknown" and x != "None" else 0)
+to_ts = lambda x : int(time.mktime(time.strptime(x, "%Y-%m-%dT%H:%M:%S"))) if x != "Unknown" and x != "None" else 0
+df["Start"] = df["Start"].apply(to_ts)
+df["Submit"] = df["Submit"].apply(to_ts)
+df["Eligible"] = df["Eligible"].apply(to_ts)
+df["EndRaw"] = df["End"].apply(to_ts)  # sacct End; df["End"] is recomputed below
 df["ElapsedRaw"] = df["ElapsedRaw"].apply(lambda x : int(x))
 df["End"] = df["Start"] + df["ElapsedRaw"]
 df['NGPUS'] = df["ReqTRES"].apply(lambda x : int(x.split("gpu=")[1].split(",")[0]) if "gpu" in x else 0)
@@ -119,7 +128,104 @@ def mystate(x):
     if "TIMEOUT" in x: return 3
     if "CANCELLED" in x: return 4
     if "FAILED" in x: return 5
+is_pending = df['State'].str.startswith("PENDING")
 df['State'] = df['State'].apply(mystate)
+
+#----------------------------------------
+# Pending (queued) jobs
+#----------------------------------------
+# A job's queue wait runs from Eligible (so --begin and dependency waits don't
+# count) until Start. Jobs still pending wait until now; jobs cancelled while
+# pending wait until their End. A never-started array record "123_[0-99%5]"
+# stands for every task of it still pending, so it is weighted by task count.
+# Pending jobs have NCPUS=0 in sacct, so requested CPUs (ReqCPUS) are used.
+def array_tasks(jobid):
+    m = re.search(r"_\[([^\]]*)\]$", str(jobid))
+    if not m:
+        return 1
+    n = 0
+    for part in m.group(1).split("%")[0].split(","):
+        rng, _, step = part.partition(":")
+        lo, _, hi = rng.partition("-")
+        try:
+            n += len(range(int(lo), int(hi or lo) + 1, int(step or 1)))
+        except ValueError:
+            n += 1
+    return max(n, 1)
+
+now_ts = int(time.time())
+never_started = (df["Start"] == 0).to_numpy()
+pend_stop = np.where(~never_started, df["Start"], np.where(is_pending, now_ts, df["EndRaw"]))
+pmask = ((df["Eligible"] > 0) & (pend_stop > df["Eligible"]) & (pend_stop > from_time)).to_numpy()
+pdf = df.loc[pmask, ["User", "JobID", "ReqCPUS", "NGPUS", "ReqMem"]].copy()
+pdf["a"] = df.loc[pmask, "Eligible"]
+pdf["b"] = pend_stop[pmask]
+mult = np.where(never_started[pmask], pdf["JobID"].apply(array_tasks), 1)
+pdf["NCPUS"] = pdf["ReqCPUS"] * mult
+pdf["NGPUS"] = pdf["NGPUS"] * mult
+pdf["ReqMem"] = pdf["ReqMem"] * mult
+pdf["NNodes"] = mult  # "# of Jobs"
+
+def _cum_at(x, w, t, ramp):
+    # Sum over i with x_i <= t of w_i (ramp=False) or w_i * (t - x_i) (ramp=True).
+    order = np.argsort(x)
+    xs, ws = x[order], w[order]
+    cw = np.concatenate([[0.0], np.cumsum(ws)])
+    k = np.searchsorted(xs, t, side="right")
+    if not ramp:
+        return cw[k]
+    cwx = np.concatenate([[0.0], np.cumsum(ws * xs)])
+    return t * cw[k] - cwx[k]
+
+def pending_series(sub, observable, t, averaged):
+    # Times are shifted to from_time to keep the float arithmetic exact.
+    a = (sub["a"].to_numpy() - from_time).astype(float)
+    b = (sub["b"].to_numpy() - from_time).astype(float)
+    w = sub[observable].to_numpy().astype(float)
+    t = (np.asarray(t) - from_time).astype(float)
+    if not averaged:  # instantaneous value at each t
+        return _cum_at(a, w, t, False) - _cum_at(b, w, t, False)
+    # average over [t_k, t_k+1): difference of the running integral at the edges
+    g = _cum_at(a, w, t, True) - _cum_at(b, w, t, True)
+    return np.diff(g) / time_res
+
+pending_users = pdf["User"].value_counts().index.tolist()
+bin_edges = [from_time + time_res * k for k in range(nbins + 1)]
+pend_snapshot_res = 300  # 5 min samples for the pending snapshot view
+pend_snapshot_from = (to_time - 3600 * 24 * 3) // pend_snapshot_res * pend_snapshot_res
+pend_snapshot_times = list(range(pend_snapshot_from, now_ts + 1, pend_snapshot_res))
+d_pending, d_pending_snapshot = {}, {}
+for user in pending_users:
+    sub = pdf[pdf["User"] == user]
+    d_pending[user] = {o: pending_series(sub, o, bin_edges, True) for o in observables}
+    d_pending_snapshot[user] = {o: pending_series(sub, o, pend_snapshot_times, False) for o in observables}
+
+# Live view of the queue right now, with Slurm's pending reasons.
+def mem_gb(s):
+    m = re.match(r"([\d.]+)([KMGT]?)", s)
+    if not m:
+        return 0.0
+    return float(m.group(1)) * {"K": 1 / 1024**2, "M": 1 / 1024, "G": 1, "T": 1024, "": 1 / 1024}[m.group(2)]
+
+pending_now = {}
+sq = subprocess.run(["/opt/slurm/bin/squeue", "-r", "-t", "PD", "-q", qos, "-h",
+                     "-O", "UserName:64,tres-alloc:400,Reason:64"],
+                    capture_output=True, text=True).stdout
+for line in sq.splitlines():
+    parts = line.split()
+    if len(parts) < 3:
+        continue
+    user, tres, reason = parts[0], parts[1], parts[2]
+    t = dict(kv.split("=", 1) for kv in tres.split(",") if "=" in kv)
+    gpus = t.get("gres/gpu") or sum(int(v) for k, v in t.items() if k.startswith("gres/gpu:"))
+    u = pending_now.setdefault(user, {"jobs": 0, "NCPUS": 0, "NGPUS": 0, "MEMORY": 0.0, "reasons": {}})
+    u["jobs"] += 1
+    u["NCPUS"] += int(t.get("cpu", 0))
+    u["NGPUS"] += int(gpus)
+    u["MEMORY"] += mem_gb(t.get("mem", "0"))
+    u["reasons"][reason] = u["reasons"].get(reason, 0) + 1
+for u in pending_now.values():
+    u["MEMORY"] = round(u["MEMORY"], 1)
 
 # Following are the data to obtain
 selected_columns = [
@@ -271,12 +377,25 @@ for observable in observables:
     for user in users:
         json_observables_snapshot[shortnames[observable]][user] = [round(float(v), 2) for v in d_snapshot[user][observable]]
 
+fmt_ts = lambda t: datetime.datetime.fromtimestamp(t, tz=eastern_timezone).strftime('%Y-%m-%dT%H:%M:%S%z')
+json_observables_pending = {shortnames[o]: {} for o in observables}
+json_observables_snapshot_pending = {shortnames[o]: {} for o in observables}
+for user in pending_users:
+    for o in observables:
+        json_observables_pending[shortnames[o]][user] = [round(float(v), 2) for v in d_pending[user][o]]
+        json_observables_snapshot_pending[shortnames[o]][user] = [round(float(v), 2) for v in d_pending_snapshot[user][o]]
+
 json_data = {
     "metadata": {
         "qos": qos,
         "last_updated": datetime.datetime.now(eastern_timezone).strftime('%Y-%m-%dT%H:%M:%S%z'),
         "time_resolution_seconds": time_res,
+        "pending_snapshot_resolution_seconds": pend_snapshot_res,
     },
+    "observables_pending": json_observables_pending,
+    "time_idxs_snapshot_pending": [fmt_ts(t) for t in pend_snapshot_times],
+    "observables_snapshot_pending": json_observables_snapshot_pending,
+    "pending_now": pending_now,
     "time_idxs": json_time_idxs,
     "time_idxs_snapshot": json_snapshot_time_idxs,
     "users": users,

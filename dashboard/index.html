@@ -256,6 +256,10 @@ tr:nth-child(even) { background: var(--table-stripe); }
     <label>Mode:</label>
     <button class="mode-toggle active" id="mode-averaged" title="Resources are averaged over fixed 1-hour bins. Covers the full 30-day window.">Averaged</button>
     <button class="mode-toggle" id="mode-snapshot" title="Exact resource usage sampled at every job start/end event. Higher fidelity but limited to the last 3 days.">Snapshot</button>
+    <div class="separator"></div>
+    <label>Show:</label>
+    <button class="mode-toggle active" id="view-running" title="Resources used by running jobs.">Running</button>
+    <button class="mode-toggle" id="view-pending" title="Resources requested by jobs waiting in the queue, from when they became eligible (dependency / --begin waits excluded) until they start. Snapshot mode samples the queue every 5 minutes.">Pending</button>
   </div>
   <div class="grid">
     <div class="chart-container"><div id="chart-NCPUS" class="chart-box"></div></div>
@@ -286,10 +290,18 @@ tr:nth-child(even) { background: var(--table-stripe); }
       <tbody></tbody>
     </table>
   </div>
+  <div class="table-section" id="pending-section" style="display:none">
+    <h2>Pending Jobs Now (live from squeue)</h2>
+    <table id="pending-table">
+      <thead><tr><th>User</th><th>Jobs</th><th>CPUs</th><th>GPUs</th><th>Memory (GB)</th><th>Why waiting</th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <p class="monthly-note">QOSGrp* (e.g. QOSGrpCpuLimit, QOSGrpGRES for GPUs) = held back by this QoS's group limit. Priority / Resources = waiting for the cluster. Dependency / BeginTime = not eligible yet; these are listed here but left out of the Pending charts.</p>
+  </div>
   <div class="table-section">
-    <h2>Total Usage Per User (Visible Range, CPU-hours)</h2>
+    <h2 id="total-title">Total Usage Per User (Visible Range, CPU-hours)</h2>
     <table id="total-table">
-      <thead><tr><th>User</th><th>CPU-hours</th><th>GPU-hours</th><th>Memory-GB-hours</th><th>Job-hours</th></tr></thead>
+      <thead><tr id="total-head"><th>User</th><th>CPU-hours</th><th>GPU-hours</th><th>Memory-GB-hours</th><th>Job-hours</th></tr></thead>
       <tbody></tbody>
     </table>
   </div>
@@ -316,6 +328,7 @@ tr:nth-child(even) { background: var(--table-stripe); }
   let cache = {};
   let monthly = null;
   let snapshotMode = localStorage.getItem('snapshotMode') === 'true';
+  let pendingView = localStorage.getItem('pendingView') === 'true';
   let darkMode = localStorage.getItem('darkMode') === 'true';
   let currentTZ = localStorage.getItem('displayTZ') || 'local';
 
@@ -428,6 +441,21 @@ tr:nth-child(even) { background: var(--table-stripe); }
     updateModeButtons();
     renderQoS();
   });
+
+  // Running / Pending view toggle
+  const viewRunBtn = document.getElementById('view-running');
+  const viewPendBtn = document.getElementById('view-pending');
+  function updateViewButtons() {
+    viewPendBtn.classList.toggle('active', pendingView);
+    viewRunBtn.classList.toggle('active', !pendingView);
+  }
+  updateViewButtons();
+  [[viewRunBtn, false], [viewPendBtn, true]].forEach(([btn, val]) => btn.addEventListener('click', () => {
+    pendingView = val;
+    localStorage.setItem('pendingView', String(val));
+    updateViewButtons();
+    renderQoS();
+  }));
 
   // Timezone selector
   const tzSelect = document.getElementById('tz-select');
@@ -562,9 +590,15 @@ tr:nth-child(even) { background: var(--table-stripe); }
     }
 
     const colors = getPlotColors();
-    const useSnapshot = snapshotMode && data.time_idxs_snapshot && data.observables_snapshot;
-    const times = useSnapshot ? data.time_idxs_snapshot : data.time_idxs;
-    const obsSource = useSnapshot ? data.observables_snapshot : data.observables;
+    // Pending view falls back to running if this JSON predates pending data.
+    const pend = pendingView && !!data.observables_pending;
+    const snapTimes = pend ? data.time_idxs_snapshot_pending : data.time_idxs_snapshot;
+    const snapObs = pend ? data.observables_snapshot_pending : data.observables_snapshot;
+    const useSnapshot = !!(snapshotMode && snapTimes && snapObs);
+    const times = useSnapshot ? snapTimes : data.time_idxs;
+    const obsSource = useSnapshot ? snapObs : (pend ? data.observables_pending : data.observables);
+    // The "current usage" table always shows running jobs.
+    const runObsSource = (snapshotMode && data.observables_snapshot) ? data.observables_snapshot : data.observables;
     const { startIdx, endIdx } = filterByRange(times);
     // Filtering uses absolute times; display uses timezone-converted wall-clock.
     const filteredTimes = toZonedTimes(times.slice(startIdx, endIdx));
@@ -596,7 +630,7 @@ tr:nth-child(even) { background: var(--table-stripe); }
       // Sort: largest last so they appear first in unified hover (reverse trace order)
       traces.sort((a, b) => a._maxVal - b._maxVal);
 
-      const threshold = data.thresholds[obsKey];
+      const threshold = pend ? 0 : data.thresholds[obsKey];  // limit applies to running jobs
       const shapes = [];
       if (threshold && threshold > 0) {
         shapes.push({
@@ -622,7 +656,7 @@ tr:nth-child(even) { background: var(--table-stripe); }
         yanchor: 'bottom',
       }] : [];
       const layout = {
-        title: { text: niceName + ' (' + currentTab + ', ' + modeLabel + ')', font: { size: 14, color: colors.text } },
+        title: { text: (pend ? 'Pending ' : '') + niceName + ' (' + currentTab + ', ' + modeLabel + ')', font: { size: 14, color: colors.text } },
         hovermode: 'x unified',
         showlegend: true,
         legend: { font: { size: 10, color: colors.text }, bgcolor: 'rgba(0,0,0,0)' },
@@ -638,9 +672,33 @@ tr:nth-child(even) { background: var(--table-stripe); }
       Plotly.react('chart-' + obsKey, traces, layout, { responsive: true, displayModeBar: true });
     });
 
-    renderUserTable(data, obsSource);
-    renderTotalTable(data, obsSource, times, startIdx, endIdx, useSnapshot);
+    renderUserTable(data, runObsSource);
+    renderPendingTable(data);
+    renderTotalTable(data, obsSource, times, startIdx, endIdx, useSnapshot, pend);
     renderMonthly(colors);
+  }
+
+  function renderPendingTable(data) {
+    const section = document.getElementById('pending-section');
+    const now = data.pending_now;
+    if (!now) { section.style.display = 'none'; return; }
+    section.style.display = '';
+    const tbody = document.querySelector('#pending-table tbody');
+    tbody.innerHTML = '';
+    const users = Object.keys(now).sort((a, b) => now[b].jobs - now[a].jobs);
+    if (!users.length) {
+      tbody.innerHTML = '<tr><td colspan="6">No pending jobs</td></tr>';
+      return;
+    }
+    users.forEach(u => {
+      const r = now[u];
+      const why = Object.entries(r.reasons).sort((a, b) => b[1] - a[1])
+        .map(([reason, n]) => reason + ' ×' + n).join(', ');
+      const tr = document.createElement('tr');
+      tr.innerHTML = '<td>' + u + '</td><td>' + r.jobs + '</td><td>' + r.NCPUS + '</td><td>' + r.NGPUS +
+        '</td><td>' + r.MEMORY.toFixed(1) + '</td><td>' + why + '</td>';
+      tbody.appendChild(tr);
+    });
   }
 
   // Validated categorical palette (fixed order; light / dark steps). Slot is
@@ -790,9 +848,15 @@ tr:nth-child(even) { background: var(--table-stripe); }
     return 0;
   }
 
-  function renderTotalTable(data, obsSource, times, startIdx, endIdx, useSnapshot) {
+  function renderTotalTable(data, obsSource, times, startIdx, endIdx, useSnapshot, pend) {
     const tbody = document.querySelector('#total-table tbody');
     tbody.innerHTML = '';
+    const q = pend ? 'Queued ' : '';
+    document.getElementById('total-title').textContent = pend
+      ? 'Total Queued Per User (Visible Range, resource-hours spent waiting)'
+      : 'Total Usage Per User (Visible Range, CPU-hours)';
+    document.getElementById('total-head').innerHTML = '<th>User</th><th>' + q + 'CPU-hours</th><th>' + q +
+      'GPU-hours</th><th>' + q + 'Memory-GB-hours</th><th>' + q + 'Job-hours</th>';
 
     // Precompute durations (in hours) for each time point in the visible range
     let durations = [];
