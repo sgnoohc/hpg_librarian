@@ -150,15 +150,26 @@ scrontab -e
 Add the following:
 
 ```
-#SCRON --export=NONE
-*/5 * * * * ~/librarian/watchdog.sh
-#SCRON --export=NONE
-*/10 * * * * ~/librarian/run.sh
+#SCRON --export=NIL
+*/5 * * * * /home/<user>/librarian/scron_env.sh '~/librarian/watchdog.sh'
+#SCRON --export=NIL
+*/10 * * * * /home/<user>/librarian/scron_env.sh '~/librarian/run.sh'
 ```
+
+(or keep a canonical copy in `scrontab.txt` and install it with `./install_scrontab.sh`).
 
 This runs:
 - **watchdog.sh** every 5 minutes: detects and recovers stuck scrontab jobs
 - **run.sh** every 10 minutes: regenerates data and deploys
+
+**Do not use `--export=NONE`.** It makes Slurm load your login environment
+on the compute node with a short timeout (an implicit `--get-user-env`). When that times out, the
+job goes to `user env retrieval failed requeued held`. Slurm refuses
+`scontrol release`/`requeue` on cron jobs, so the series stops until it is
+cancelled and reinstalled. With `--export=NIL` the job starts with an empty environment
+(no `HOME`/`PATH`, `~` does not expand), and `scron_env.sh` builds the login
+environment inside the job instead. That's why the command path is absolute and the
+wrapped command is quoted.
 
 ### 8. Verify scrontab is running
 
@@ -179,7 +190,9 @@ tail ~/scron/logs/watchdog.log
 | `run.sh` | Main pipeline: runs parse, SCPs files, deploys to GitHub Pages |
 | `deploy_pages.sh` | Pushes dashboard + JSON to gh-pages branch |
 | `gpu_monthly.py` | Permanent monthly GPU log (total + per user) in `gpu_usage/`, refreshed every 6h by `run.sh` |
-| `watchdog.sh` | Monitors and recovers stuck scrontab jobs |
+| `watchdog.sh` | Recovers held scrontab jobs (scancel + `install_scrontab.sh --enable`); never touches non-cron jobs |
+| `scron_env.sh` | Wraps scrontab commands: builds the login env inside the job (used with `--export=NIL`) |
+| `scrontab.txt` / `install_scrontab.sh` | Canonical scrontab and its installer |
 | `dashboard/index.html` | Self-contained interactive Plotly.js dashboard |
 
 ## Monthly GPU Usage Log

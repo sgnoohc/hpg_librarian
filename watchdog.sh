@@ -1,8 +1,16 @@
 #!/bin/bash
-# watchdog.sh - Self-healing watchdog for scrontab jobs
-# Detects stuck Slurm jobs and attempts recovery.
+# watchdog.sh - Self-healing watchdog for scrontab jobs.
 # Intended to run every 5 minutes via scrontab.
+#
+# A scrontab job whose launch fails (e.g. "user env retrieval failed requeued
+# held") stays held forever: Slurm rejects scontrol release/requeue for cron
+# jobs. The only recovery is to scancel it (Slurm then comments its line out
+# as "#DISABLED:") and re-enable the scrontab, which creates a fresh job.
+#
+# Only cron jobs (CronJob=Yes) are touched; regular batch jobs are never
+# cancelled.
 
+DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 LOGFILE="$HOME/scron/logs/watchdog.log"
 mkdir -p "$(dirname "$LOGFILE")"
 
@@ -10,39 +18,20 @@ log() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') $1" >> "$LOGFILE"
 }
 
-# Find our stuck jobs: held, requeued, or with known failure reasons
-STUCK_JOBS=$(/opt/slurm/bin/squeue --me --noheader --states=PD \
-    --format="%i %T %r" 2>/dev/null | \
-    grep -iE "held|requeue|user env|launch failed" || true)
+HELD=()
+while read -r JOBID REASON; do
+    [ -n "$JOBID" ] || continue
+    /opt/slurm/bin/scontrol show job "$JOBID" 2>/dev/null | grep -q 'CronJob=Yes' || continue
+    log "held cron job $JOBID: $REASON"
+    HELD+=("$JOBID")
+done < <(/opt/slurm/bin/squeue --me --noheader --states=PD --format="%i %r" 2>/dev/null | \
+         grep -iE "held|requeue|user env|launch failed")
 
-if [ -z "$STUCK_JOBS" ]; then
-    exit 0
-fi
+[ ${#HELD[@]} -eq 0 ] && exit 0
 
-log "Found stuck jobs:"
-echo "$STUCK_JOBS" | while read -r line; do
-    log "  $line"
-done
+log "cancelling ${HELD[*]} and re-enabling scrontab"
+/opt/slurm/bin/scancel "${HELD[@]}" >>"$LOGFILE" 2>&1
+sleep 5
+"$DIR/install_scrontab.sh" --enable >>"$LOGFILE" 2>&1 || log "install_scrontab.sh --enable failed"
 
-echo "$STUCK_JOBS" | while read -r JOBID STATE REASON; do
-    # Try release first (non-destructive)
-    log "Attempting scontrol release on job $JOBID (state=$STATE reason=$REASON)"
-    /opt/slurm/bin/scontrol release "$JOBID" 2>>"$LOGFILE"
-
-    sleep 5
-
-    # Check if still stuck
-    STILL_STUCK=$(/opt/slurm/bin/squeue --me --noheader --job="$JOBID" \
-        --format="%T %r" 2>/dev/null | \
-        grep -iE "held|requeue|user env|launch failed" || true)
-
-    if [ -n "$STILL_STUCK" ]; then
-        log "Job $JOBID still stuck after release, cancelling"
-        /opt/slurm/bin/scancel "$JOBID" 2>>"$LOGFILE"
-        log "Cancelled job $JOBID - scrontab will reschedule"
-    else
-        log "Job $JOBID released successfully"
-    fi
-done
-
-log "Watchdog check complete"
+log "now queued: $(/opt/slurm/bin/squeue --me --noheader --format='%i:%r' 2>/dev/null | tr '\n' ' ')"

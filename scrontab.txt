@@ -1,0 +1,37 @@
+# Canonical scrontab for p.chang — source of truth, version controlled.
+# Install with: ~/librarian/install_scrontab.sh
+#
+# NOTE: when you scancel a scrontab job, Slurm only prepends "#DISABLED:" to
+# the line; it does not remove it. Re-running the installer restores this file
+# verbatim, re-enabling everything.
+#
+# NOTE: do NOT use --export=NONE. It triggers Slurm's implicit --get-user-env;
+# when that times out the job lands in "user env retrieval failed requeued
+# held", which scontrol cannot release for cron jobs, and the series stops for
+# good (this killed everything on 2026-11-05). Use --export=NIL and wrap each
+# command in scron_env.sh, which builds the login env inside the job instead.
+# Paths must be absolute or quoted: under NIL, HOME is unset until the wrapper runs.
+
+# --- watchdog: recover held cron jobs every 5 min ---
+#SCRON --export=NIL
+#SCRON --partition=hpg-default
+#SCRON --job-name=scron-watchdog
+*/5 * * * * /home/p.chang/librarian/scron_env.sh '~/librarian/watchdog.sh'
+
+# --- usage dashboard: parse + deploy every 10 min ---
+#SCRON --export=NIL
+#SCRON --partition=hpg-default
+#SCRON --job-name=scron-librarian
+*/10 * * * * /home/p.chang/librarian/scron_env.sh '~/librarian/run.sh'
+
+# --- lori daily report at 06:00 ---
+#SCRON --export=NIL
+#SCRON --partition=hpg-default
+#SCRON --job-name=scron-lori-daily
+0 6 * * * /home/p.chang/librarian/scron_env.sh 'cd ~/monet/lori && /home/p.chang/bin/lori html && /home/p.chang/bin/lori email && cd ~/.lori && tar czf /tmp/.copy.tar.gz dashboard.html && scp /tmp/.copy.tar.gz uaf-10:~/public_html/hpg && ssh uaf-10 "cd ~/public_html/hpg; tar xzf .copy.tar.gz"'
+
+# --- lori alert check every 15 min ---
+#SCRON --export=NIL
+#SCRON --partition=hpg-default
+#SCRON --job-name=scron-lori-alerts
+*/15 * * * * /home/p.chang/librarian/scron_env.sh '/home/p.chang/bin/lori --check-alerts'
