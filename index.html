@@ -196,6 +196,8 @@ th { font-weight: 600; background: var(--bg-secondary); }
 tr:nth-child(even) { background: var(--table-stripe); }
 .monthly-head { padding-bottom: 0; }
 #total-table tr.total-row td { font-weight: 600; border-top: 2px solid var(--border); }
+.swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 8px; vertical-align: -1px; }
+#total-table tr.total-row td:first-child { padding-left: 30px; }
 .monthly-note { font-size: 0.8rem; color: var(--text-secondary); }
 #monthly-table td:not(:first-child), #monthly-table th:not(:first-child) { text-align: right; font-variant-numeric: tabular-nums; }
 .status-bar {
@@ -666,28 +668,40 @@ tr:nth-child(even) { background: var(--table-stripe); }
         };
       }).filter(Boolean);
 
-      const traces = byType ? typeTraces : data.users.map(user => {
+      // Users stack in color-slot order (the order the palette is validated
+      // for), so every chart stacks and colors a user the same way. Users
+      // without a slot share the "Other" grey under one legend entry but keep
+      // their own name in the hover.
+      const traces = byType ? typeTraces : usersBySlot(data).map(user => {
         const vals = obsData[user];
         if (!vals) return null;
         const sliced = vals.slice(startIdx, endIdx);
-        const maxVal = Math.max(...sliced);
-        if (maxVal === 0) return null; // skip users with all zeros in range
-        // Replace zeros with null so they are hidden from unified hover
-        const yvals = sliced.map(v => v > 0 ? v : null);
+        if (!sliced.some(v => v > 0)) return null; // skip users with all zeros in range
+        const { color, other } = userColor(data, user);
         return {
           x: filteredTimes,
-          y: yvals,
+          // Zeros -> null so they are hidden from unified hover
+          y: sliced.map(v => v > 0 ? v : null),
           name: user,
           type: 'scatter',
           mode: 'none',
           stackgroup: 'one',
-          line: { width: 0, shape: useSnapshot ? 'hv' : 'linear' },
-          hovertemplate: '%{y:.1f}<extra>%{fullData.name}</extra>',
-          _maxVal: maxVal,
+          fillcolor: color,
+          // No surface-gap edge here: with dozens of thin hourly bands it would
+          // white out the small ones. The line color only feeds the hover swatch.
+          line: { width: 0, color: color, shape: useSnapshot ? 'hv' : 'linear' },
+          legendgroup: other ? 'other' : user,
+          hovertemplate: '%{y:.1f}<extra>' + user + '</extra>',
+          _other: other,
         };
       }).filter(Boolean);
-      // Sort: largest last so they appear first in unified hover (reverse trace order)
-      if (!byType) traces.sort((a, b) => a._maxVal - b._maxVal);
+      if (!byType) {
+        const others = traces.filter(t => t._other);
+        others.forEach((t, i) => {
+          t.showlegend = i === 0;
+          if (i === 0) t.name = 'Other (' + others.length + ')';
+        });
+      }
 
       const threshold = pend ? 0 : data.thresholds[obsKey];  // limit applies to running jobs
       const shapes = [];
@@ -756,7 +770,7 @@ tr:nth-child(even) { background: var(--table-stripe); }
       const types = Object.entries(r.gpu_types || {}).map(([t, n]) => t + ' ' + n).join(', ');
       const gpus = r.NGPUS && types ? r.NGPUS + ' (' + types + ')' : r.NGPUS;
       const tr = document.createElement('tr');
-      tr.innerHTML = '<td>' + u + '</td><td>' + r.jobs + '</td><td>' + r.NCPUS + '</td><td>' + gpus +
+      tr.innerHTML = '<td>' + swatch(data, u) + u + '</td><td>' + r.jobs + '</td><td>' + r.NCPUS + '</td><td>' + gpus +
         '</td><td>' + r.MEMORY.toFixed(1) + '</td><td>' + why + '</td>';
       tbody.appendChild(tr);
     });
@@ -764,9 +778,30 @@ tr:nth-child(even) { background: var(--table-stripe); }
 
   // Validated categorical palette (fixed order; light / dark steps). Slot is
   // assigned by all-time GPU-hours rank so a user keeps one color in every month.
-  const SERIES_LIGHT = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#008300', '#4a3aa7'];
-  const SERIES_DARK  = ['#3987e5', '#d95926', '#199e70', '#c98500', '#d55181', '#008300', '#9085e9'];
+  // Slots are assigned per QoS by parse.py (data.user_colors, kept stable
+  // across runs), so a user has the same color in every chart.
+  const SERIES_LIGHT = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#008300', '#6250d6', '#e34948'];
+  const SERIES_DARK  = ['#3987e5', '#d95926', '#199e70', '#c98500', '#d55181', '#0ca30c', '#9085e9', '#e66767'];
   const OTHER_COLOR = { light: '#a3a29c', dark: '#6b6a64' };
+
+  function userColor(data, user) {
+    const dark = document.documentElement.getAttribute('data-theme') === 'dark';
+    const slot = (data.user_colors || {})[user];
+    if (slot === undefined) return { color: dark ? OTHER_COLOR.dark : OTHER_COLOR.light, other: true };
+    return { color: (dark ? SERIES_DARK : SERIES_LIGHT)[slot], other: false };
+  }
+
+  // Users with a color slot first, in slot order; then everyone else.
+  function usersBySlot(data, users) {
+    const map = data.user_colors || {};
+    const list = users || data.users;
+    return list.filter(u => map[u] !== undefined).sort((a, b) => map[a] - map[b])
+      .concat(list.filter(u => map[u] === undefined));
+  }
+
+  function swatch(data, user) {
+    return '<span class="swatch" style="background:' + userColor(data, user).color + '"></span>';
+  }
 
   function renderMonthly(colors) {
     const section = document.getElementById('monthly-section');
@@ -786,16 +821,19 @@ tr:nth-child(even) { background: var(--table-stripe); }
     const months = rows.map(r => r.month);
     const labels = rows.map(fmtMonth);
 
-    // Per-user GPU-hours per month (summed over GPU types); top 7 by all-time total, rest -> Other.
+    // Per-user GPU-hours per month (summed over GPU types), in the same colors
+    // as the time-series charts; users without a color slot -> Other.
     const perUser = {};
     monthly.byUser.filter(r => r.qos === currentTab).forEach(r => {
       const u = perUser[r.user] = perUser[r.user] || {};
       u[r.month] = (u[r.month] || 0) + parseFloat(r.gpu_hours);
     });
     const total = u => Object.values(perUser[u]).reduce((a, b) => a + b, 0);
-    const ranked = Object.keys(perUser).filter(u => total(u) > 0).sort((a, b) => total(b) - total(a));
-    const named = ranked.slice(0, series.length);
-    const rest = ranked.slice(series.length);
+    const data = cache[currentTab] || {};
+    const slotOf = data.user_colors || {};
+    const withHours = Object.keys(perUser).filter(u => total(u) > 0);
+    const named = usersBySlot(data, withHours).filter(u => slotOf[u] !== undefined);
+    const rest = withHours.filter(u => slotOf[u] === undefined);
 
     const barBase = {
       type: 'bar',
@@ -817,11 +855,11 @@ tr:nth-child(even) { background: var(--table-stripe); }
       hovertemplate: '%{y:,.0f} GPU-h<extra>' + t + '</extra>',
     }));
 
-    const traces = gpuByType ? typeTraces : named.map((u, i) => ({
+    const traces = gpuByType ? typeTraces : named.map(u => ({
       ...barBase,
       name: u,
       y: months.map(m => perUser[u][m] || 0),
-      marker: { ...barBase.marker, color: series[i] },
+      marker: { ...barBase.marker, color: userColor(data, u).color },
       hovertemplate: '%{y:,.0f} GPU-h<extra>' + u + '</extra>',
     }));
     if (!gpuByType && rest.length) {
@@ -910,7 +948,7 @@ tr:nth-child(even) { background: var(--table-stripe); }
 
     rows.forEach(r => {
       const tr = document.createElement('tr');
-      tr.innerHTML = '<td>' + r.user + '</td><td>' + r.cpus.toFixed(1) + '</td><td>' + r.gpus.toFixed(1) + '</td><td>' + r.mem.toFixed(1) + '</td><td>' + r.jobs.toFixed(1) + '</td>';
+      tr.innerHTML = '<td>' + swatch(data, r.user) + r.user + '</td><td>' + r.cpus.toFixed(1) + '</td><td>' + r.gpus.toFixed(1) + '</td><td>' + r.mem.toFixed(1) + '</td><td>' + r.jobs.toFixed(1) + '</td>';
       tbody.appendChild(tr);
     });
   }
@@ -980,7 +1018,7 @@ tr:nth-child(even) { background: var(--table-stripe); }
 
     rows.forEach(r => {
       const tr = document.createElement('tr');
-      tr.innerHTML = '<td>' + r.user + '</td>' + cells(r);
+      tr.innerHTML = '<td>' + swatch(data, r.user) + r.user + '</td>' + cells(r);
       tbody.appendChild(tr);
     });
     if (rows.length > 1) {
