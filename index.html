@@ -195,6 +195,7 @@ th, td {
 th { font-weight: 600; background: var(--bg-secondary); }
 tr:nth-child(even) { background: var(--table-stripe); }
 .monthly-head { padding-bottom: 0; }
+#total-table tr.total-row td { font-weight: 600; border-top: 2px solid var(--border); }
 .monthly-note { font-size: 0.8rem; color: var(--text-secondary); }
 #monthly-table td:not(:first-child), #monthly-table th:not(:first-child) { text-align: right; font-variant-numeric: tabular-nums; }
 .status-bar {
@@ -260,6 +261,10 @@ tr:nth-child(even) { background: var(--table-stripe); }
     <label>Show:</label>
     <button class="mode-toggle active" id="view-running" title="Resources used by running jobs.">Running</button>
     <button class="mode-toggle" id="view-pending" title="Resources requested by jobs waiting in the queue, from when they became eligible (dependency / --begin waits excluded) until they start. Snapshot mode samples the queue every 5 minutes.">Pending</button>
+    <div class="separator"></div>
+    <label>GPUs by:</label>
+    <button class="mode-toggle active" id="gpu-by-user" title="Stack the GPU charts by user.">User</button>
+    <button class="mode-toggle" id="gpu-by-type" title="Stack the GPU charts by GPU model: L4, B200, Other (e.g. RTX Pro 6000). Type is the allocated GPU, else the requested type, else the partition's GPU.">Type</button>
   </div>
   <div class="grid">
     <div class="chart-container"><div id="chart-NCPUS" class="chart-box"></div></div>
@@ -329,6 +334,8 @@ tr:nth-child(even) { background: var(--table-stripe); }
   let monthly = null;
   let snapshotMode = localStorage.getItem('snapshotMode') === 'true';
   let pendingView = localStorage.getItem('pendingView') === 'true';
+  let gpuByType = localStorage.getItem('gpuByType') === 'true';
+  const GPU_TYPES = ['L4', 'B200', 'Other'];  // stack order, bottom to top
   let darkMode = localStorage.getItem('darkMode') === 'true';
   let currentTZ = localStorage.getItem('displayTZ') || 'local';
 
@@ -456,6 +463,39 @@ tr:nth-child(even) { background: var(--table-stripe); }
     updateViewButtons();
     renderQoS();
   }));
+
+  // GPUs by user / by type toggle
+  const gpuUserBtn = document.getElementById('gpu-by-user');
+  const gpuTypeBtn = document.getElementById('gpu-by-type');
+  function updateGpuButtons() {
+    gpuTypeBtn.classList.toggle('active', gpuByType);
+    gpuUserBtn.classList.toggle('active', !gpuByType);
+  }
+  updateGpuButtons();
+  [[gpuUserBtn, false], [gpuTypeBtn, true]].forEach(([btn, val]) => btn.addEventListener('click', () => {
+    gpuByType = val;
+    localStorage.setItem('gpuByType', String(val));
+    updateGpuButtons();
+    renderQoS();
+  }));
+
+  // Fixed color per GPU type, shared by the time series and monthly charts.
+  function gpuTypeColor(type) {
+    const dark = document.documentElement.getAttribute('data-theme') === 'dark';
+    const series = dark ? SERIES_DARK : SERIES_LIGHT;
+    if (type === 'L4') return series[0];
+    if (type === 'B200') return series[1];
+    return dark ? OTHER_COLOR.dark : OTHER_COLOR.light;
+  }
+
+  // Sum a per-user series over users, for indices [startIdx, endIdx).
+  function sumUsers(perUser, startIdx, endIdx) {
+    const out = new Array(endIdx - startIdx).fill(0);
+    Object.values(perUser || {}).forEach(arr => {
+      for (let i = startIdx; i < endIdx; i++) out[i - startIdx] += arr[i] || 0;
+    });
+    return out;
+  }
 
   // Timezone selector
   const tzSelect = document.getElementById('tz-select');
@@ -607,7 +647,26 @@ tr:nth-child(even) { background: var(--table-stripe); }
       const obsData = obsSource[obsKey];
       if (!obsData) return;
 
-      const traces = data.users.map(user => {
+      // GPU chart "by type": one stacked series per GPU model, summed over users.
+      const byType = obsKey === 'NGPUS' && gpuByType && !!data.gpu_types;
+      const typeTraces = !byType ? null : GPU_TYPES.map(type => {
+        const vals = sumUsers(obsSource[data.gpu_types[type]], startIdx, endIdx);
+        if (!vals.some(v => v > 0)) return null;
+        const color = gpuTypeColor(type);
+        return {
+          x: filteredTimes,
+          y: vals.map(v => v > 0 ? v : null),
+          name: type,
+          type: 'scatter',
+          mode: 'none',
+          stackgroup: 'one',
+          fillcolor: color,
+          line: { width: 0, color: color, shape: useSnapshot ? 'hv' : 'linear' },
+          hovertemplate: '%{y:.1f}<extra>' + type + '</extra>',
+        };
+      }).filter(Boolean);
+
+      const traces = byType ? typeTraces : data.users.map(user => {
         const vals = obsData[user];
         if (!vals) return null;
         const sliced = vals.slice(startIdx, endIdx);
@@ -628,7 +687,7 @@ tr:nth-child(even) { background: var(--table-stripe); }
         };
       }).filter(Boolean);
       // Sort: largest last so they appear first in unified hover (reverse trace order)
-      traces.sort((a, b) => a._maxVal - b._maxVal);
+      if (!byType) traces.sort((a, b) => a._maxVal - b._maxVal);
 
       const threshold = pend ? 0 : data.thresholds[obsKey];  // limit applies to running jobs
       const shapes = [];
@@ -656,7 +715,7 @@ tr:nth-child(even) { background: var(--table-stripe); }
         yanchor: 'bottom',
       }] : [];
       const layout = {
-        title: { text: (pend ? 'Pending ' : '') + niceName + ' (' + currentTab + ', ' + modeLabel + ')', font: { size: 14, color: colors.text } },
+        title: { text: (pend ? 'Pending ' : '') + niceName + (byType ? ' by type' : '') + ' (' + currentTab + ', ' + modeLabel + ')', font: { size: 14, color: colors.text } },
         hovermode: 'x unified',
         showlegend: true,
         legend: { font: { size: 10, color: colors.text }, bgcolor: 'rgba(0,0,0,0)' },
@@ -694,8 +753,10 @@ tr:nth-child(even) { background: var(--table-stripe); }
       const r = now[u];
       const why = Object.entries(r.reasons).sort((a, b) => b[1] - a[1])
         .map(([reason, n]) => reason + ' ×' + n).join(', ');
+      const types = Object.entries(r.gpu_types || {}).map(([t, n]) => t + ' ' + n).join(', ');
+      const gpus = r.NGPUS && types ? r.NGPUS + ' (' + types + ')' : r.NGPUS;
       const tr = document.createElement('tr');
-      tr.innerHTML = '<td>' + u + '</td><td>' + r.jobs + '</td><td>' + r.NCPUS + '</td><td>' + r.NGPUS +
+      tr.innerHTML = '<td>' + u + '</td><td>' + r.jobs + '</td><td>' + r.NCPUS + '</td><td>' + gpus +
         '</td><td>' + r.MEMORY.toFixed(1) + '</td><td>' + why + '</td>';
       tbody.appendChild(tr);
     });
@@ -741,14 +802,29 @@ tr:nth-child(even) { background: var(--table-stripe); }
       x: labels,
       marker: { line: { color: colors.bg, width: 1 } },  // surface gap between stacked segments
     };
-    const traces = named.map((u, i) => ({
+    // "GPUs by: Type" stacks months by GPU model instead of by user.
+    const TYPE_OF = { l4: 'L4', b200: 'B200' };
+    const perType = {};
+    monthly.byUser.filter(r => r.qos === currentTab).forEach(r => {
+      const t = perType[TYPE_OF[r.gpu_type] || 'Other'] = perType[TYPE_OF[r.gpu_type] || 'Other'] || {};
+      t[r.month] = (t[r.month] || 0) + parseFloat(r.gpu_hours);
+    });
+    const typeTraces = GPU_TYPES.filter(t => perType[t]).map(t => ({
+      ...barBase,
+      name: t,
+      y: months.map(m => perType[t][m] || 0),
+      marker: { ...barBase.marker, color: gpuTypeColor(t) },
+      hovertemplate: '%{y:,.0f} GPU-h<extra>' + t + '</extra>',
+    }));
+
+    const traces = gpuByType ? typeTraces : named.map((u, i) => ({
       ...barBase,
       name: u,
       y: months.map(m => perUser[u][m] || 0),
       marker: { ...barBase.marker, color: series[i] },
       hovertemplate: '%{y:,.0f} GPU-h<extra>' + u + '</extra>',
     }));
-    if (rest.length) {
+    if (!gpuByType && rest.length) {
       traces.push({
         ...barBase,
         name: 'Other (' + rest.length + ')',
@@ -783,7 +859,7 @@ tr:nth-child(even) { background: var(--table-stripe); }
     Plotly.react('chart-monthly-gpuh', traces, {
       ...layoutBase,
       barmode: 'stack',
-      title: { text: 'GPU-hours per month by user', x: 0.02, xanchor: 'left', font: { size: 14, color: colors.text } },
+      title: { text: 'GPU-hours per month by ' + (gpuByType ? 'GPU type' : 'user'), x: 0.02, xanchor: 'left', font: { size: 14, color: colors.text } },
       yaxis: { ...axisBase, title: { text: 'GPU-hours', font: { color: colors.text } }, rangemode: 'tozero' },
     }, { responsive: true, displayModeBar: true });
 
@@ -855,8 +931,6 @@ tr:nth-child(even) { background: var(--table-stripe); }
     document.getElementById('total-title').textContent = pend
       ? 'Total Queued Per User (Visible Range, resource-hours spent waiting)'
       : 'Total Usage Per User (Visible Range, CPU-hours)';
-    document.getElementById('total-head').innerHTML = '<th>User</th><th>' + q + 'CPU-hours</th><th>' + q +
-      'GPU-hours</th><th>' + q + 'Memory-GB-hours</th><th>' + q + 'Job-hours</th>';
 
     // Precompute durations (in hours) for each time point in the visible range
     let durations = [];
@@ -888,17 +962,36 @@ tr:nth-child(even) { background: var(--table-stripe); }
       const gpuH = sum('NGPUS');
       const memH = sum('MEMORY');
       const jobH = sum('NJOBS');
+      const typeH = GPU_TYPES.map(t => data.gpu_types ? sum(data.gpu_types[t]) : 0);
       const total = cpuH + gpuH + memH;
-      if (total > 0) rows.push({ user, cpuH, gpuH, memH, jobH, total });
+      if (total > 0) rows.push({ user, cpuH, gpuH, typeH, memH, jobH, total });
     });
 
     rows.sort((a, b) => b.total - a.total);
 
+    // GPU-hours split by GPU model, when this QoS used any GPUs in range.
+    const showTypes = !!data.gpu_types && rows.some(r => r.gpuH > 0);
+    document.getElementById('total-head').innerHTML = '<th>User</th><th>' + q + 'CPU-hours</th><th>' + q + 'GPU-hours</th>' +
+      (showTypes ? GPU_TYPES.map(t => '<th>' + q + t + ' GPU-hours</th>').join('') : '') +
+      '<th>' + q + 'Memory-GB-hours</th><th>' + q + 'Job-hours</th>';
+    const cells = r => '<td>' + r.cpuH.toFixed(1) + '</td><td>' + r.gpuH.toFixed(1) + '</td>' +
+      (showTypes ? r.typeH.map(h => '<td>' + h.toFixed(1) + '</td>').join('') : '') +
+      '<td>' + r.memH.toFixed(1) + '</td><td>' + r.jobH.toFixed(1) + '</td>';
+
     rows.forEach(r => {
       const tr = document.createElement('tr');
-      tr.innerHTML = '<td>' + r.user + '</td><td>' + r.cpuH.toFixed(1) + '</td><td>' + r.gpuH.toFixed(1) + '</td><td>' + r.memH.toFixed(1) + '</td><td>' + r.jobH.toFixed(1) + '</td>';
+      tr.innerHTML = '<td>' + r.user + '</td>' + cells(r);
       tbody.appendChild(tr);
     });
+    if (rows.length > 1) {
+      const add = k => rows.reduce((s, r) => s + r[k], 0);
+      const tot = { cpuH: add('cpuH'), gpuH: add('gpuH'), memH: add('memH'), jobH: add('jobH'),
+                    typeH: GPU_TYPES.map((_, i) => rows.reduce((s, r) => s + r.typeH[i], 0)) };
+      const tr = document.createElement('tr');
+      tr.className = 'total-row';
+      tr.innerHTML = '<td>Total</td>' + cells(tot);
+      tbody.appendChild(tr);
+    }
   }
 
   async function init() {
