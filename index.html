@@ -274,6 +274,17 @@ tr:nth-child(even) { background: var(--table-stripe); }
     <div class="chart-container"><div id="chart-MEMORY" class="chart-box"></div></div>
     <div class="chart-container"><div id="chart-NJOBS" class="chart-box"></div></div>
   </div>
+  <div id="gpu-type-section" style="display:none">
+    <div class="table-section monthly-head">
+      <h2 id="gpu-type-title">GPUs by Type</h2>
+      <p class="monthly-note">One chart per GPU model, stacked by user. Type = allocated GPU, else the requested type, else the partition's GPU. No limit line: the QoS GPU limit covers all types together.</p>
+    </div>
+    <div class="grid">
+      <div class="chart-container"><div id="chart-GPU-L4" class="chart-box"></div></div>
+      <div class="chart-container"><div id="chart-GPU-B200" class="chart-box"></div></div>
+      <div class="chart-container"><div id="chart-GPU-Other" class="chart-box"></div></div>
+    </div>
+  </div>
   <div id="monthly-section" style="display:none">
     <div class="table-section monthly-head">
       <h2 id="monthly-title">Monthly GPU Usage</h2>
@@ -645,6 +656,7 @@ tr:nth-child(even) { background: var(--table-stripe); }
     // Filtering uses absolute times; display uses timezone-converted wall-clock.
     const filteredTimes = toZonedTimes(times.slice(startIdx, endIdx));
 
+    const modeLabel = useSnapshot ? 'snapshot' : 'averaged';
     OBS_KEYS.forEach(obsKey => {
       const obsData = obsSource[obsKey];
       if (!obsData) return;
@@ -668,87 +680,98 @@ tr:nth-child(even) { background: var(--table-stripe); }
         };
       }).filter(Boolean);
 
-      // Users stack in color-slot order (the order the palette is validated
-      // for), so every chart stacks and colors a user the same way. Users
-      // without a slot share the "Other" grey under one legend entry but keep
-      // their own name in the hover.
-      const traces = byType ? typeTraces : usersBySlot(data).map(user => {
-        const vals = obsData[user];
-        if (!vals) return null;
-        const sliced = vals.slice(startIdx, endIdx);
-        if (!sliced.some(v => v > 0)) return null; // skip users with all zeros in range
-        const { color, other } = userColor(data, user);
-        return {
-          x: filteredTimes,
-          // Zeros -> null so they are hidden from unified hover
-          y: sliced.map(v => v > 0 ? v : null),
-          name: user,
-          type: 'scatter',
-          mode: 'none',
-          stackgroup: 'one',
-          fillcolor: color,
-          // No surface-gap edge here: with dozens of thin hourly bands it would
-          // white out the small ones. The line color only feeds the hover swatch.
-          line: { width: 0, color: color, shape: useSnapshot ? 'hv' : 'linear' },
-          legendgroup: other ? 'other' : user,
-          hovertemplate: '%{y:.1f}<extra>' + user + '</extra>',
-          _other: other,
-        };
-      }).filter(Boolean);
-      if (!byType) {
-        const others = traces.filter(t => t._other);
-        others.forEach((t, i) => {
-          t.showlegend = i === 0;
-          if (i === 0) t.name = 'Other (' + others.length + ')';
-        });
-      }
-
+      const traces = byType ? typeTraces : userTraces(data, obsData, startIdx, endIdx, filteredTimes, useSnapshot);
       const threshold = pend ? 0 : data.thresholds[obsKey];  // limit applies to running jobs
-      const shapes = [];
-      if (threshold && threshold > 0) {
-        shapes.push({
-          type: 'line',
-          x0: filteredTimes[0],
-          x1: filteredTimes[filteredTimes.length - 1],
-          y0: threshold,
-          y1: threshold,
-          line: { color: 'red', dash: 'dash', width: 2 },
-          layer: 'above',
-        });
-      }
-
       const niceName = data.nice_names[obsKey] || obsKey;
-      const modeLabel = useSnapshot ? 'snapshot' : 'averaged';
-      const thresholdAnnotation = (threshold && threshold > 0) ? [{
-        x: filteredTimes[filteredTimes.length - 1],
-        y: threshold,
-        text: 'Limit: ' + threshold,
-        showarrow: false,
-        font: { color: 'red', size: 10 },
-        xanchor: 'right',
-        yanchor: 'bottom',
-      }] : [];
-      const layout = {
-        title: { text: (pend ? 'Pending ' : '') + niceName + (byType ? ' by type' : '') + ' (' + currentTab + ', ' + modeLabel + ')', font: { size: 14, color: colors.text } },
-        hovermode: 'x unified',
-        showlegend: true,
-        legend: { font: { size: 10, color: colors.text }, bgcolor: 'rgba(0,0,0,0)' },
-        margin: { l: 50, r: 20, t: 40, b: 50 },
-        paper_bgcolor: colors.bg,
-        plot_bgcolor: colors.bg,
-        xaxis: { gridcolor: colors.grid, tickfont: { color: colors.text }, title: { text: 'Time (' + (tzSelect.options[tzSelect.selectedIndex] ? tzSelect.options[tzSelect.selectedIndex].text : currentTZ) + ')', font: { size: 10, color: colors.text } } },
-        yaxis: { gridcolor: colors.grid, tickfont: { color: colors.text }, title: { text: niceName, font: { color: colors.text } }, rangemode: 'tozero' },
-        shapes: shapes,
-        annotations: thresholdAnnotation,
-      };
-
-      Plotly.react('chart-' + obsKey, traces, layout, { responsive: true, displayModeBar: true });
+      const title = (pend ? 'Pending ' : '') + niceName + (byType ? ' by type' : '') + ' (' + currentTab + ', ' + modeLabel + ')';
+      Plotly.react('chart-' + obsKey, traces, chartLayout(colors, title, niceName, filteredTimes, threshold),
+                   { responsive: true, displayModeBar: true });
     });
+
+    // One chart per GPU model, stacked by user. A type with no use anywhere in
+    // this view's data is hidden (not just out of range), so the layout does
+    // not jump when the time range changes.
+    let anyGpuType = false;
+    GPU_TYPES.forEach(type => {
+      const box = document.getElementById('chart-GPU-' + type);
+      const perUser = data.gpu_types ? obsSource[data.gpu_types[type]] : null;
+      const used = !!perUser && Object.values(perUser).some(arr => arr.some(v => v > 0));
+      box.parentElement.style.display = used ? '' : 'none';
+      if (!used) return;
+      anyGpuType = true;
+      const yTitle = '# of ' + type + ' GPUs';
+      const title = (pend ? 'Pending ' : '') + yTitle + ' (' + currentTab + ', ' + modeLabel + ')';
+      Plotly.react(box, userTraces(data, perUser, startIdx, endIdx, filteredTimes, useSnapshot),
+                   chartLayout(colors, title, yTitle, filteredTimes, 0), { responsive: true, displayModeBar: true });
+    });
+    document.getElementById('gpu-type-section').style.display = anyGpuType ? '' : 'none';
+    document.getElementById('gpu-type-title').textContent = (pend ? 'Pending ' : '') + 'GPUs by Type (' + currentTab + ')';
 
     renderUserTable(data, runObsSource);
     renderPendingTable(data);
     renderTotalTable(data, obsSource, times, startIdx, endIdx, useSnapshot, pend);
     renderMonthly(colors);
+  }
+
+  // Stacked-area traces, one per user. Users stack in color-slot order (the
+  // order the palette is validated for), so every chart stacks and colors a
+  // user the same way. Users without a slot share the "Other" grey under one
+  // legend entry but keep their own name in the hover.
+  function userTraces(data, perUser, startIdx, endIdx, x, useSnapshot) {
+    const traces = usersBySlot(data).map(user => {
+      const vals = perUser[user];
+      if (!vals) return null;
+      const sliced = vals.slice(startIdx, endIdx);
+      if (!sliced.some(v => v > 0)) return null; // skip users with all zeros in range
+      const { color, other } = userColor(data, user);
+      return {
+        x: x,
+        // Zeros -> null so they are hidden from unified hover
+        y: sliced.map(v => v > 0 ? v : null),
+        name: user,
+        type: 'scatter',
+        mode: 'none',
+        stackgroup: 'one',
+        fillcolor: color,
+        // No surface-gap edge here: with dozens of thin hourly bands it would
+        // white out the small ones. The line color only feeds the hover swatch.
+        line: { width: 0, color: color, shape: useSnapshot ? 'hv' : 'linear' },
+        legendgroup: other ? 'other' : user,
+        hovertemplate: '%{y:.1f}<extra>' + user + '</extra>',
+        _other: other,
+      };
+    }).filter(Boolean);
+    const others = traces.filter(t => t._other);
+    others.forEach((t, i) => {
+      t.showlegend = i === 0;
+      if (i === 0) t.name = 'Other (' + others.length + ')';
+    });
+    return traces;
+  }
+
+  // Shared time-series layout; threshold > 0 adds the dashed limit line.
+  function chartLayout(colors, title, yTitle, x, threshold) {
+    const limit = threshold && threshold > 0;
+    const tzLabel = tzSelect.options[tzSelect.selectedIndex] ? tzSelect.options[tzSelect.selectedIndex].text : currentTZ;
+    return {
+      title: { text: title, font: { size: 14, color: colors.text } },
+      hovermode: 'x unified',
+      showlegend: true,
+      legend: { font: { size: 10, color: colors.text }, bgcolor: 'rgba(0,0,0,0)' },
+      margin: { l: 50, r: 20, t: 40, b: 50 },
+      paper_bgcolor: colors.bg,
+      plot_bgcolor: colors.bg,
+      xaxis: { gridcolor: colors.grid, tickfont: { color: colors.text }, title: { text: 'Time (' + tzLabel + ')', font: { size: 10, color: colors.text } } },
+      yaxis: { gridcolor: colors.grid, tickfont: { color: colors.text }, title: { text: yTitle, font: { color: colors.text } }, rangemode: 'tozero' },
+      shapes: limit ? [{
+        type: 'line', x0: x[0], x1: x[x.length - 1], y0: threshold, y1: threshold,
+        line: { color: 'red', dash: 'dash', width: 2 }, layer: 'above',
+      }] : [],
+      annotations: limit ? [{
+        x: x[x.length - 1], y: threshold, text: 'Limit: ' + threshold, showarrow: false,
+        font: { color: 'red', size: 10 }, xanchor: 'right', yanchor: 'bottom',
+      }] : [],
+    };
   }
 
   function renderPendingTable(data) {
