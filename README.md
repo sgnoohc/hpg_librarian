@@ -27,6 +27,19 @@ Generates interactive dashboards showing CPU, GPU, memory, and job usage per use
   are counted per task), hourly-averaged over 30 days or sampled every 5 min over 3 days
 - "Pending Jobs Now" table (live `squeue`) with each user's pending reasons
   (`QOSGrp*` = blocked by the QoS group limit; `Priority`/`Resources` = waiting on the cluster)
+- GPUs by User / Type toggle: GPU chart and monthly GPU-hours stacked by GPU model
+  (L4, B200, Other). Type = allocated GPU, else requested type, else the partition's GPU
+  (from `sinfo`), so pending "any GPU" jobs are typed too. The totals table always shows
+  L4 / B200 / Other GPU-hours per user plus a Total row
+- "GPUs by Type" charts: one chart per GPU model (L4, B200, Other), stacked by user,
+  following the same time range / Running-Pending / Averaged-Snapshot settings; types
+  with no use in the current view are hidden
+- Stable per-user colors: each QoS's 8 most significant users (largest share of any
+  running/pending total, or of all-time GPU-hours) get one of 8 colorblind-validated
+  slots and keep it in every chart, table swatch, view and refresh; everyone else is
+  "Other" grey. Slots persist in `user_colors.json` and only change hands when a new user
+  enters the top 8 with no slot free; a user keeps the same slot across QoS tabs when it's
+  free. Delete `user_colors.json` to reassign from scratch
 - Dark mode (persisted in browser)
 - Auto-refreshes data every 5 minutes
 

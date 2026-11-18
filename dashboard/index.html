@@ -195,6 +195,9 @@ th, td {
 th { font-weight: 600; background: var(--bg-secondary); }
 tr:nth-child(even) { background: var(--table-stripe); }
 .monthly-head { padding-bottom: 0; }
+#total-table tr.total-row td { font-weight: 600; border-top: 2px solid var(--border); }
+.swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 8px; vertical-align: -1px; }
+#total-table tr.total-row td:first-child { padding-left: 30px; }
 .monthly-note { font-size: 0.8rem; color: var(--text-secondary); }
 #monthly-table td:not(:first-child), #monthly-table th:not(:first-child) { text-align: right; font-variant-numeric: tabular-nums; }
 .status-bar {
@@ -260,12 +263,27 @@ tr:nth-child(even) { background: var(--table-stripe); }
     <label>Show:</label>
     <button class="mode-toggle active" id="view-running" title="Resources used by running jobs.">Running</button>
     <button class="mode-toggle" id="view-pending" title="Resources requested by jobs waiting in the queue, from when they became eligible (dependency / --begin waits excluded) until they start. Snapshot mode samples the queue every 5 minutes.">Pending</button>
+    <div class="separator"></div>
+    <label>GPUs by:</label>
+    <button class="mode-toggle active" id="gpu-by-user" title="Stack the GPU charts by user.">User</button>
+    <button class="mode-toggle" id="gpu-by-type" title="Stack the GPU charts by GPU model: L4, B200, Other (e.g. RTX Pro 6000). Type is the allocated GPU, else the requested type, else the partition's GPU.">Type</button>
   </div>
   <div class="grid">
     <div class="chart-container"><div id="chart-NCPUS" class="chart-box"></div></div>
     <div class="chart-container"><div id="chart-NGPUS" class="chart-box"></div></div>
     <div class="chart-container"><div id="chart-MEMORY" class="chart-box"></div></div>
     <div class="chart-container"><div id="chart-NJOBS" class="chart-box"></div></div>
+  </div>
+  <div id="gpu-type-section" style="display:none">
+    <div class="table-section monthly-head">
+      <h2 id="gpu-type-title">GPUs by Type</h2>
+      <p class="monthly-note">One chart per GPU model, stacked by user. Type = allocated GPU, else the requested type, else the partition's GPU. No limit line: the QoS GPU limit covers all types together.</p>
+    </div>
+    <div class="grid">
+      <div class="chart-container"><div id="chart-GPU-L4" class="chart-box"></div></div>
+      <div class="chart-container"><div id="chart-GPU-B200" class="chart-box"></div></div>
+      <div class="chart-container"><div id="chart-GPU-Other" class="chart-box"></div></div>
+    </div>
   </div>
   <div id="monthly-section" style="display:none">
     <div class="table-section monthly-head">
@@ -329,6 +347,8 @@ tr:nth-child(even) { background: var(--table-stripe); }
   let monthly = null;
   let snapshotMode = localStorage.getItem('snapshotMode') === 'true';
   let pendingView = localStorage.getItem('pendingView') === 'true';
+  let gpuByType = localStorage.getItem('gpuByType') === 'true';
+  const GPU_TYPES = ['L4', 'B200', 'Other'];  // stack order, bottom to top
   let darkMode = localStorage.getItem('darkMode') === 'true';
   let currentTZ = localStorage.getItem('displayTZ') || 'local';
 
@@ -456,6 +476,39 @@ tr:nth-child(even) { background: var(--table-stripe); }
     updateViewButtons();
     renderQoS();
   }));
+
+  // GPUs by user / by type toggle
+  const gpuUserBtn = document.getElementById('gpu-by-user');
+  const gpuTypeBtn = document.getElementById('gpu-by-type');
+  function updateGpuButtons() {
+    gpuTypeBtn.classList.toggle('active', gpuByType);
+    gpuUserBtn.classList.toggle('active', !gpuByType);
+  }
+  updateGpuButtons();
+  [[gpuUserBtn, false], [gpuTypeBtn, true]].forEach(([btn, val]) => btn.addEventListener('click', () => {
+    gpuByType = val;
+    localStorage.setItem('gpuByType', String(val));
+    updateGpuButtons();
+    renderQoS();
+  }));
+
+  // Fixed color per GPU type, shared by the time series and monthly charts.
+  function gpuTypeColor(type) {
+    const dark = document.documentElement.getAttribute('data-theme') === 'dark';
+    const series = dark ? SERIES_DARK : SERIES_LIGHT;
+    if (type === 'L4') return series[0];
+    if (type === 'B200') return series[1];
+    return dark ? OTHER_COLOR.dark : OTHER_COLOR.light;
+  }
+
+  // Sum a per-user series over users, for indices [startIdx, endIdx).
+  function sumUsers(perUser, startIdx, endIdx) {
+    const out = new Array(endIdx - startIdx).fill(0);
+    Object.values(perUser || {}).forEach(arr => {
+      for (let i = startIdx; i < endIdx; i++) out[i - startIdx] += arr[i] || 0;
+    });
+    return out;
+  }
 
   // Timezone selector
   const tzSelect = document.getElementById('tz-select');
@@ -603,79 +656,122 @@ tr:nth-child(even) { background: var(--table-stripe); }
     // Filtering uses absolute times; display uses timezone-converted wall-clock.
     const filteredTimes = toZonedTimes(times.slice(startIdx, endIdx));
 
+    const modeLabel = useSnapshot ? 'snapshot' : 'averaged';
     OBS_KEYS.forEach(obsKey => {
       const obsData = obsSource[obsKey];
       if (!obsData) return;
 
-      const traces = data.users.map(user => {
-        const vals = obsData[user];
-        if (!vals) return null;
-        const sliced = vals.slice(startIdx, endIdx);
-        const maxVal = Math.max(...sliced);
-        if (maxVal === 0) return null; // skip users with all zeros in range
-        // Replace zeros with null so they are hidden from unified hover
-        const yvals = sliced.map(v => v > 0 ? v : null);
+      // GPU chart "by type": one stacked series per GPU model, summed over users.
+      const byType = obsKey === 'NGPUS' && gpuByType && !!data.gpu_types;
+      const typeTraces = !byType ? null : GPU_TYPES.map(type => {
+        const vals = sumUsers(obsSource[data.gpu_types[type]], startIdx, endIdx);
+        if (!vals.some(v => v > 0)) return null;
+        const color = gpuTypeColor(type);
         return {
           x: filteredTimes,
-          y: yvals,
-          name: user,
+          y: vals.map(v => v > 0 ? v : null),
+          name: type,
           type: 'scatter',
           mode: 'none',
           stackgroup: 'one',
-          line: { width: 0, shape: useSnapshot ? 'hv' : 'linear' },
-          hovertemplate: '%{y:.1f}<extra>%{fullData.name}</extra>',
-          _maxVal: maxVal,
+          fillcolor: color,
+          line: { width: 0, color: color, shape: useSnapshot ? 'hv' : 'linear' },
+          hovertemplate: '%{y:.1f}<extra>' + type + '</extra>',
         };
       }).filter(Boolean);
-      // Sort: largest last so they appear first in unified hover (reverse trace order)
-      traces.sort((a, b) => a._maxVal - b._maxVal);
 
+      const traces = byType ? typeTraces : userTraces(data, obsData, startIdx, endIdx, filteredTimes, useSnapshot);
       const threshold = pend ? 0 : data.thresholds[obsKey];  // limit applies to running jobs
-      const shapes = [];
-      if (threshold && threshold > 0) {
-        shapes.push({
-          type: 'line',
-          x0: filteredTimes[0],
-          x1: filteredTimes[filteredTimes.length - 1],
-          y0: threshold,
-          y1: threshold,
-          line: { color: 'red', dash: 'dash', width: 2 },
-          layer: 'above',
-        });
-      }
-
       const niceName = data.nice_names[obsKey] || obsKey;
-      const modeLabel = useSnapshot ? 'snapshot' : 'averaged';
-      const thresholdAnnotation = (threshold && threshold > 0) ? [{
-        x: filteredTimes[filteredTimes.length - 1],
-        y: threshold,
-        text: 'Limit: ' + threshold,
-        showarrow: false,
-        font: { color: 'red', size: 10 },
-        xanchor: 'right',
-        yanchor: 'bottom',
-      }] : [];
-      const layout = {
-        title: { text: (pend ? 'Pending ' : '') + niceName + ' (' + currentTab + ', ' + modeLabel + ')', font: { size: 14, color: colors.text } },
-        hovermode: 'x unified',
-        showlegend: true,
-        legend: { font: { size: 10, color: colors.text }, bgcolor: 'rgba(0,0,0,0)' },
-        margin: { l: 50, r: 20, t: 40, b: 50 },
-        paper_bgcolor: colors.bg,
-        plot_bgcolor: colors.bg,
-        xaxis: { gridcolor: colors.grid, tickfont: { color: colors.text }, title: { text: 'Time (' + (tzSelect.options[tzSelect.selectedIndex] ? tzSelect.options[tzSelect.selectedIndex].text : currentTZ) + ')', font: { size: 10, color: colors.text } } },
-        yaxis: { gridcolor: colors.grid, tickfont: { color: colors.text }, title: { text: niceName, font: { color: colors.text } }, rangemode: 'tozero' },
-        shapes: shapes,
-        annotations: thresholdAnnotation,
-      };
-
-      Plotly.react('chart-' + obsKey, traces, layout, { responsive: true, displayModeBar: true });
+      const title = (pend ? 'Pending ' : '') + niceName + (byType ? ' by type' : '') + ' (' + currentTab + ', ' + modeLabel + ')';
+      Plotly.react('chart-' + obsKey, traces, chartLayout(colors, title, niceName, filteredTimes, threshold),
+                   { responsive: true, displayModeBar: true });
     });
+
+    // One chart per GPU model, stacked by user. A type with no use anywhere in
+    // this view's data is hidden (not just out of range), so the layout does
+    // not jump when the time range changes.
+    let anyGpuType = false;
+    GPU_TYPES.forEach(type => {
+      const box = document.getElementById('chart-GPU-' + type);
+      const perUser = data.gpu_types ? obsSource[data.gpu_types[type]] : null;
+      const used = !!perUser && Object.values(perUser).some(arr => arr.some(v => v > 0));
+      box.parentElement.style.display = used ? '' : 'none';
+      if (!used) return;
+      anyGpuType = true;
+      const yTitle = '# of ' + type + ' GPUs';
+      const title = (pend ? 'Pending ' : '') + yTitle + ' (' + currentTab + ', ' + modeLabel + ')';
+      Plotly.react(box, userTraces(data, perUser, startIdx, endIdx, filteredTimes, useSnapshot),
+                   chartLayout(colors, title, yTitle, filteredTimes, 0), { responsive: true, displayModeBar: true });
+    });
+    document.getElementById('gpu-type-section').style.display = anyGpuType ? '' : 'none';
+    document.getElementById('gpu-type-title').textContent = (pend ? 'Pending ' : '') + 'GPUs by Type (' + currentTab + ')';
 
     renderUserTable(data, runObsSource);
     renderPendingTable(data);
     renderTotalTable(data, obsSource, times, startIdx, endIdx, useSnapshot, pend);
     renderMonthly(colors);
+  }
+
+  // Stacked-area traces, one per user. Users stack in color-slot order (the
+  // order the palette is validated for), so every chart stacks and colors a
+  // user the same way. Users without a slot share the "Other" grey under one
+  // legend entry but keep their own name in the hover.
+  function userTraces(data, perUser, startIdx, endIdx, x, useSnapshot) {
+    const traces = usersBySlot(data).map(user => {
+      const vals = perUser[user];
+      if (!vals) return null;
+      const sliced = vals.slice(startIdx, endIdx);
+      if (!sliced.some(v => v > 0)) return null; // skip users with all zeros in range
+      const { color, other } = userColor(data, user);
+      return {
+        x: x,
+        // Zeros -> null so they are hidden from unified hover
+        y: sliced.map(v => v > 0 ? v : null),
+        name: user,
+        type: 'scatter',
+        mode: 'none',
+        stackgroup: 'one',
+        fillcolor: color,
+        // No surface-gap edge here: with dozens of thin hourly bands it would
+        // white out the small ones. The line color only feeds the hover swatch.
+        line: { width: 0, color: color, shape: useSnapshot ? 'hv' : 'linear' },
+        legendgroup: other ? 'other' : user,
+        hovertemplate: '%{y:.1f}<extra>' + user + '</extra>',
+        _other: other,
+      };
+    }).filter(Boolean);
+    const others = traces.filter(t => t._other);
+    others.forEach((t, i) => {
+      t.showlegend = i === 0;
+      if (i === 0) t.name = 'Other (' + others.length + ')';
+    });
+    return traces;
+  }
+
+  // Shared time-series layout; threshold > 0 adds the dashed limit line.
+  function chartLayout(colors, title, yTitle, x, threshold) {
+    const limit = threshold && threshold > 0;
+    const tzLabel = tzSelect.options[tzSelect.selectedIndex] ? tzSelect.options[tzSelect.selectedIndex].text : currentTZ;
+    return {
+      title: { text: title, font: { size: 14, color: colors.text } },
+      hovermode: 'x unified',
+      showlegend: true,
+      legend: { font: { size: 10, color: colors.text }, bgcolor: 'rgba(0,0,0,0)' },
+      margin: { l: 50, r: 20, t: 40, b: 50 },
+      paper_bgcolor: colors.bg,
+      plot_bgcolor: colors.bg,
+      xaxis: { gridcolor: colors.grid, tickfont: { color: colors.text }, title: { text: 'Time (' + tzLabel + ')', font: { size: 10, color: colors.text } } },
+      yaxis: { gridcolor: colors.grid, tickfont: { color: colors.text }, title: { text: yTitle, font: { color: colors.text } }, rangemode: 'tozero' },
+      shapes: limit ? [{
+        type: 'line', x0: x[0], x1: x[x.length - 1], y0: threshold, y1: threshold,
+        line: { color: 'red', dash: 'dash', width: 2 }, layer: 'above',
+      }] : [],
+      annotations: limit ? [{
+        x: x[x.length - 1], y: threshold, text: 'Limit: ' + threshold, showarrow: false,
+        font: { color: 'red', size: 10 }, xanchor: 'right', yanchor: 'bottom',
+      }] : [],
+    };
   }
 
   function renderPendingTable(data) {
@@ -694,8 +790,10 @@ tr:nth-child(even) { background: var(--table-stripe); }
       const r = now[u];
       const why = Object.entries(r.reasons).sort((a, b) => b[1] - a[1])
         .map(([reason, n]) => reason + ' ×' + n).join(', ');
+      const types = Object.entries(r.gpu_types || {}).map(([t, n]) => t + ' ' + n).join(', ');
+      const gpus = r.NGPUS && types ? r.NGPUS + ' (' + types + ')' : r.NGPUS;
       const tr = document.createElement('tr');
-      tr.innerHTML = '<td>' + u + '</td><td>' + r.jobs + '</td><td>' + r.NCPUS + '</td><td>' + r.NGPUS +
+      tr.innerHTML = '<td>' + swatch(data, u) + u + '</td><td>' + r.jobs + '</td><td>' + r.NCPUS + '</td><td>' + gpus +
         '</td><td>' + r.MEMORY.toFixed(1) + '</td><td>' + why + '</td>';
       tbody.appendChild(tr);
     });
@@ -703,9 +801,30 @@ tr:nth-child(even) { background: var(--table-stripe); }
 
   // Validated categorical palette (fixed order; light / dark steps). Slot is
   // assigned by all-time GPU-hours rank so a user keeps one color in every month.
-  const SERIES_LIGHT = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#008300', '#4a3aa7'];
-  const SERIES_DARK  = ['#3987e5', '#d95926', '#199e70', '#c98500', '#d55181', '#008300', '#9085e9'];
+  // Slots are assigned per QoS by parse.py (data.user_colors, kept stable
+  // across runs), so a user has the same color in every chart.
+  const SERIES_LIGHT = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#008300', '#6250d6', '#e34948'];
+  const SERIES_DARK  = ['#3987e5', '#d95926', '#199e70', '#c98500', '#d55181', '#0ca30c', '#9085e9', '#e66767'];
   const OTHER_COLOR = { light: '#a3a29c', dark: '#6b6a64' };
+
+  function userColor(data, user) {
+    const dark = document.documentElement.getAttribute('data-theme') === 'dark';
+    const slot = (data.user_colors || {})[user];
+    if (slot === undefined) return { color: dark ? OTHER_COLOR.dark : OTHER_COLOR.light, other: true };
+    return { color: (dark ? SERIES_DARK : SERIES_LIGHT)[slot], other: false };
+  }
+
+  // Users with a color slot first, in slot order; then everyone else.
+  function usersBySlot(data, users) {
+    const map = data.user_colors || {};
+    const list = users || data.users;
+    return list.filter(u => map[u] !== undefined).sort((a, b) => map[a] - map[b])
+      .concat(list.filter(u => map[u] === undefined));
+  }
+
+  function swatch(data, user) {
+    return '<span class="swatch" style="background:' + userColor(data, user).color + '"></span>';
+  }
 
   function renderMonthly(colors) {
     const section = document.getElementById('monthly-section');
@@ -725,30 +844,48 @@ tr:nth-child(even) { background: var(--table-stripe); }
     const months = rows.map(r => r.month);
     const labels = rows.map(fmtMonth);
 
-    // Per-user GPU-hours per month (summed over GPU types); top 7 by all-time total, rest -> Other.
+    // Per-user GPU-hours per month (summed over GPU types), in the same colors
+    // as the time-series charts; users without a color slot -> Other.
     const perUser = {};
     monthly.byUser.filter(r => r.qos === currentTab).forEach(r => {
       const u = perUser[r.user] = perUser[r.user] || {};
       u[r.month] = (u[r.month] || 0) + parseFloat(r.gpu_hours);
     });
     const total = u => Object.values(perUser[u]).reduce((a, b) => a + b, 0);
-    const ranked = Object.keys(perUser).filter(u => total(u) > 0).sort((a, b) => total(b) - total(a));
-    const named = ranked.slice(0, series.length);
-    const rest = ranked.slice(series.length);
+    const data = cache[currentTab] || {};
+    const slotOf = data.user_colors || {};
+    const withHours = Object.keys(perUser).filter(u => total(u) > 0);
+    const named = usersBySlot(data, withHours).filter(u => slotOf[u] !== undefined);
+    const rest = withHours.filter(u => slotOf[u] === undefined);
 
     const barBase = {
       type: 'bar',
       x: labels,
       marker: { line: { color: colors.bg, width: 1 } },  // surface gap between stacked segments
     };
-    const traces = named.map((u, i) => ({
+    // "GPUs by: Type" stacks months by GPU model instead of by user.
+    const TYPE_OF = { l4: 'L4', b200: 'B200' };
+    const perType = {};
+    monthly.byUser.filter(r => r.qos === currentTab).forEach(r => {
+      const t = perType[TYPE_OF[r.gpu_type] || 'Other'] = perType[TYPE_OF[r.gpu_type] || 'Other'] || {};
+      t[r.month] = (t[r.month] || 0) + parseFloat(r.gpu_hours);
+    });
+    const typeTraces = GPU_TYPES.filter(t => perType[t]).map(t => ({
+      ...barBase,
+      name: t,
+      y: months.map(m => perType[t][m] || 0),
+      marker: { ...barBase.marker, color: gpuTypeColor(t) },
+      hovertemplate: '%{y:,.0f} GPU-h<extra>' + t + '</extra>',
+    }));
+
+    const traces = gpuByType ? typeTraces : named.map(u => ({
       ...barBase,
       name: u,
       y: months.map(m => perUser[u][m] || 0),
-      marker: { ...barBase.marker, color: series[i] },
+      marker: { ...barBase.marker, color: userColor(data, u).color },
       hovertemplate: '%{y:,.0f} GPU-h<extra>' + u + '</extra>',
     }));
-    if (rest.length) {
+    if (!gpuByType && rest.length) {
       traces.push({
         ...barBase,
         name: 'Other (' + rest.length + ')',
@@ -783,7 +920,7 @@ tr:nth-child(even) { background: var(--table-stripe); }
     Plotly.react('chart-monthly-gpuh', traces, {
       ...layoutBase,
       barmode: 'stack',
-      title: { text: 'GPU-hours per month by user', x: 0.02, xanchor: 'left', font: { size: 14, color: colors.text } },
+      title: { text: 'GPU-hours per month by ' + (gpuByType ? 'GPU type' : 'user'), x: 0.02, xanchor: 'left', font: { size: 14, color: colors.text } },
       yaxis: { ...axisBase, title: { text: 'GPU-hours', font: { color: colors.text } }, rangemode: 'tozero' },
     }, { responsive: true, displayModeBar: true });
 
@@ -834,7 +971,7 @@ tr:nth-child(even) { background: var(--table-stripe); }
 
     rows.forEach(r => {
       const tr = document.createElement('tr');
-      tr.innerHTML = '<td>' + r.user + '</td><td>' + r.cpus.toFixed(1) + '</td><td>' + r.gpus.toFixed(1) + '</td><td>' + r.mem.toFixed(1) + '</td><td>' + r.jobs.toFixed(1) + '</td>';
+      tr.innerHTML = '<td>' + swatch(data, r.user) + r.user + '</td><td>' + r.cpus.toFixed(1) + '</td><td>' + r.gpus.toFixed(1) + '</td><td>' + r.mem.toFixed(1) + '</td><td>' + r.jobs.toFixed(1) + '</td>';
       tbody.appendChild(tr);
     });
   }
@@ -855,8 +992,6 @@ tr:nth-child(even) { background: var(--table-stripe); }
     document.getElementById('total-title').textContent = pend
       ? 'Total Queued Per User (Visible Range, resource-hours spent waiting)'
       : 'Total Usage Per User (Visible Range, CPU-hours)';
-    document.getElementById('total-head').innerHTML = '<th>User</th><th>' + q + 'CPU-hours</th><th>' + q +
-      'GPU-hours</th><th>' + q + 'Memory-GB-hours</th><th>' + q + 'Job-hours</th>';
 
     // Precompute durations (in hours) for each time point in the visible range
     let durations = [];
@@ -888,17 +1023,36 @@ tr:nth-child(even) { background: var(--table-stripe); }
       const gpuH = sum('NGPUS');
       const memH = sum('MEMORY');
       const jobH = sum('NJOBS');
+      const typeH = GPU_TYPES.map(t => data.gpu_types ? sum(data.gpu_types[t]) : 0);
       const total = cpuH + gpuH + memH;
-      if (total > 0) rows.push({ user, cpuH, gpuH, memH, jobH, total });
+      if (total > 0) rows.push({ user, cpuH, gpuH, typeH, memH, jobH, total });
     });
 
     rows.sort((a, b) => b.total - a.total);
 
+    // GPU-hours split by GPU model, when this QoS used any GPUs in range.
+    const showTypes = !!data.gpu_types && rows.some(r => r.gpuH > 0);
+    document.getElementById('total-head').innerHTML = '<th>User</th><th>' + q + 'CPU-hours</th><th>' + q + 'GPU-hours</th>' +
+      (showTypes ? GPU_TYPES.map(t => '<th>' + q + t + ' GPU-hours</th>').join('') : '') +
+      '<th>' + q + 'Memory-GB-hours</th><th>' + q + 'Job-hours</th>';
+    const cells = r => '<td>' + r.cpuH.toFixed(1) + '</td><td>' + r.gpuH.toFixed(1) + '</td>' +
+      (showTypes ? r.typeH.map(h => '<td>' + h.toFixed(1) + '</td>').join('') : '') +
+      '<td>' + r.memH.toFixed(1) + '</td><td>' + r.jobH.toFixed(1) + '</td>';
+
     rows.forEach(r => {
       const tr = document.createElement('tr');
-      tr.innerHTML = '<td>' + r.user + '</td><td>' + r.cpuH.toFixed(1) + '</td><td>' + r.gpuH.toFixed(1) + '</td><td>' + r.memH.toFixed(1) + '</td><td>' + r.jobH.toFixed(1) + '</td>';
+      tr.innerHTML = '<td>' + swatch(data, r.user) + r.user + '</td>' + cells(r);
       tbody.appendChild(tr);
     });
+    if (rows.length > 1) {
+      const add = k => rows.reduce((s, r) => s + r[k], 0);
+      const tot = { cpuH: add('cpuH'), gpuH: add('gpuH'), memH: add('memH'), jobH: add('jobH'),
+                    typeH: GPU_TYPES.map((_, i) => rows.reduce((s, r) => s + r.typeH[i], 0)) };
+      const tr = document.createElement('tr');
+      tr.className = 'total-row';
+      tr.innerHTML = '<td>Total</td>' + cells(tot);
+      tbody.appendChild(tr);
+    }
   }
 
   async function init() {

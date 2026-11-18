@@ -94,6 +94,8 @@ column_headers = [
         "Eligible",
         "End",
         "ReqCPUS",
+        "AllocTRES",
+        "Partition",
         ]
 
 # Creating some colunm name to integer matching
@@ -121,6 +123,44 @@ df["ElapsedRaw"] = df["ElapsedRaw"].apply(lambda x : int(x))
 df["End"] = df["Start"] + df["ElapsedRaw"]
 df['NGPUS'] = df["ReqTRES"].apply(lambda x : int(x.split("gpu=")[1].split(",")[0]) if "gpu" in x else 0)
 df['ReqMem'] = df["ReqMem"].apply(lambda x : int(x.replace("M", "")) / 1024)
+
+#----------------------------------------
+# GPU type split (L4 / B200 / Other)
+#----------------------------------------
+# Type = allocated type, else requested type, else the partition's GPU type.
+# Jobs that ask for "any GPU" only get a type once allocated, so pending jobs
+# rely on the partition (each GPU partition has a single GPU model).
+GPU_TYPE_BUCKETS = {"l4": "L4", "b200": "B200"}
+gpu_type_observables = {"L4": "NGPUS_L4", "B200": "NGPUS_B200", "Other": "NGPUS_OTHER"}
+
+def partition_gpu_types():
+    out = subprocess.run(["/opt/slurm/bin/sinfo", "-h", "-o", "%P %G"],
+                         capture_output=True, text=True).stdout
+    types = {}
+    for line in out.splitlines():
+        part, _, gres = line.partition(" ")
+        for m in re.finditer(r"gpu:([^:(,]+):", gres):
+            types.setdefault(part.rstrip("*"), set()).add(m.group(1))
+    return {p: t.pop() for p, t in types.items() if len(t) == 1}
+
+partition_gpu = partition_gpu_types()
+
+def gpu_type(*tres, partition=""):
+    for s in tres:
+        m = re.search(r"gres/gpu:([^=,]+)=", str(s))
+        if m:
+            return GPU_TYPE_BUCKETS.get(m.group(1), "Other")
+    types = {partition_gpu.get(p) for p in str(partition).split(",")}
+    return GPU_TYPE_BUCKETS.get(types.pop(), "Other") if len(types) == 1 else "Other"
+
+has_gpu = df["NGPUS"] > 0
+df["GPUTYPE"] = ""
+df.loc[has_gpu, "GPUTYPE"] = [gpu_type(a, r, partition=p) for a, r, p in
+                              zip(df.loc[has_gpu, "AllocTRES"], df.loc[has_gpu, "ReqTRES"], df.loc[has_gpu, "Partition"])]
+for bucket, col in gpu_type_observables.items():
+    df[col] = df["NGPUS"].where(df["GPUTYPE"] == bucket, 0)
+all_observables = observables + list(gpu_type_observables.values())
+
 def mystate(x):
     if "PENDING" in x: return 0
     if "RUNNING" in x: return 1
@@ -157,12 +197,14 @@ now_ts = int(time.time())
 never_started = (df["Start"] == 0).to_numpy()
 pend_stop = np.where(~never_started, df["Start"], np.where(is_pending, now_ts, df["EndRaw"]))
 pmask = ((df["Eligible"] > 0) & (pend_stop > df["Eligible"]) & (pend_stop > from_time)).to_numpy()
-pdf = df.loc[pmask, ["User", "JobID", "ReqCPUS", "NGPUS", "ReqMem"]].copy()
+gpu_cols = ["NGPUS"] + list(gpu_type_observables.values())
+pdf = df.loc[pmask, ["User", "JobID", "ReqCPUS", "ReqMem"] + gpu_cols].copy()
 pdf["a"] = df.loc[pmask, "Eligible"]
 pdf["b"] = pend_stop[pmask]
 mult = np.where(never_started[pmask], pdf["JobID"].apply(array_tasks), 1)
 pdf["NCPUS"] = pdf["ReqCPUS"] * mult
-pdf["NGPUS"] = pdf["NGPUS"] * mult
+for col in gpu_cols:
+    pdf[col] = pdf[col] * mult
 pdf["ReqMem"] = pdf["ReqMem"] * mult
 pdf["NNodes"] = mult  # "# of Jobs"
 
@@ -177,28 +219,34 @@ def _cum_at(x, w, t, ramp):
     cwx = np.concatenate([[0.0], np.cumsum(ws * xs)])
     return t * cw[k] - cwx[k]
 
-def pending_series(sub, observable, t, averaged):
+def interval_series(a, b, w, t, averaged):
+    # Sum of weights w_i over intervals [a_i, b_i): the value at each time t
+    # (averaged=False), or its average over each bin [t_k, t_k+1) (averaged=True).
     # Times are shifted to from_time to keep the float arithmetic exact.
-    a = (sub["a"].to_numpy() - from_time).astype(float)
-    b = (sub["b"].to_numpy() - from_time).astype(float)
-    w = sub[observable].to_numpy().astype(float)
+    a = (np.asarray(a) - from_time).astype(float)
+    b = (np.asarray(b) - from_time).astype(float)
+    w = np.asarray(w).astype(float)
     t = (np.asarray(t) - from_time).astype(float)
-    if not averaged:  # instantaneous value at each t
+    if not averaged:
         return _cum_at(a, w, t, False) - _cum_at(b, w, t, False)
-    # average over [t_k, t_k+1): difference of the running integral at the edges
+    # difference of the running integral at the bin edges
     g = _cum_at(a, w, t, True) - _cum_at(b, w, t, True)
     return np.diff(g) / time_res
+
+def per_user_series(frame, a_col, b_col, user_list, t, averaged):
+    out = {}
+    for user in user_list:
+        sub = frame[frame["User"] == user]
+        out[user] = {o: interval_series(sub[a_col], sub[b_col], sub[o], t, averaged) for o in all_observables}
+    return out
 
 pending_users = pdf["User"].value_counts().index.tolist()
 bin_edges = [from_time + time_res * k for k in range(nbins + 1)]
 pend_snapshot_res = 300  # 5 min samples for the pending snapshot view
 pend_snapshot_from = (to_time - 3600 * 24 * 3) // pend_snapshot_res * pend_snapshot_res
 pend_snapshot_times = list(range(pend_snapshot_from, now_ts + 1, pend_snapshot_res))
-d_pending, d_pending_snapshot = {}, {}
-for user in pending_users:
-    sub = pdf[pdf["User"] == user]
-    d_pending[user] = {o: pending_series(sub, o, bin_edges, True) for o in observables}
-    d_pending_snapshot[user] = {o: pending_series(sub, o, pend_snapshot_times, False) for o in observables}
+d_pending = per_user_series(pdf, "a", "b", pending_users, bin_edges, True)
+d_pending_snapshot = per_user_series(pdf, "a", "b", pending_users, pend_snapshot_times, False)
 
 # Live view of the queue right now, with Slurm's pending reasons.
 def mem_gb(s):
@@ -209,19 +257,23 @@ def mem_gb(s):
 
 pending_now = {}
 sq = subprocess.run(["/opt/slurm/bin/squeue", "-r", "-t", "PD", "-q", qos, "-h",
-                     "-O", "UserName:64,tres-alloc:400,Reason:64"],
+                     "-O", "UserName:64,tres-alloc:400,Partition:400,Reason:64"],
                     capture_output=True, text=True).stdout
 for line in sq.splitlines():
     parts = line.split()
-    if len(parts) < 3:
+    if len(parts) < 4:
         continue
-    user, tres, reason = parts[0], parts[1], parts[2]
+    user, tres, partition, reason = parts[:4]
     t = dict(kv.split("=", 1) for kv in tres.split(",") if "=" in kv)
-    gpus = t.get("gres/gpu") or sum(int(v) for k, v in t.items() if k.startswith("gres/gpu:"))
-    u = pending_now.setdefault(user, {"jobs": 0, "NCPUS": 0, "NGPUS": 0, "MEMORY": 0.0, "reasons": {}})
+    gpus = int(t.get("gres/gpu") or sum(int(v) for k, v in t.items() if k.startswith("gres/gpu:")))
+    u = pending_now.setdefault(user, {"jobs": 0, "NCPUS": 0, "NGPUS": 0, "MEMORY": 0.0, "reasons": {},
+                                      "gpu_types": {}})
     u["jobs"] += 1
     u["NCPUS"] += int(t.get("cpu", 0))
-    u["NGPUS"] += int(gpus)
+    u["NGPUS"] += gpus
+    if gpus:
+        gt = gpu_type(tres, partition=partition)
+        u["gpu_types"][gt] = u["gpu_types"].get(gt, 0) + gpus
     u["MEMORY"] += mem_gb(t.get("mem", "0"))
     u["reasons"][reason] = u["reasons"].get(reason, 0) + 1
 for u in pending_now.values():
@@ -242,7 +294,7 @@ selected_columns = [
         "JobIDRaw",
         "NodeList",
         "Reason",
-        ]
+        ] + list(gpu_type_observables.values())
 
 # Subselect the columns
 df = df[selected_columns]
@@ -250,38 +302,9 @@ df = df[selected_columns]
 # Get all users within this time period
 users = df["User"].value_counts().index.tolist()
 
-# Loop over time bin boundaries
-for i in range(nbins):
-
-    # If first bin create list
-    if i == 0:
-        for user in users:
-            d[user] = {}
-            for observable in observables:
-                d[user][observable] = [0] * nbins
-
-    # Obtain time bin boundary
-    bt = from_time + time_res * (i)
-    et = from_time + time_res * (i + 1)
-
-    # Subselect data within time bin boundary
-    df_timebin = df.loc[(df.Start < et) & (df.End > bt)]
-
-    # Compute each length of job in the given time bin (some jobs may have started in this bin, some may have ended in this bin)
-    df_timebin["WithinTimeBinEnd"] = df_timebin["End"].apply(lambda x : x if x < et else et)
-    df_timebin["WithinTimeBinStart"] = df_timebin["Start"].apply(lambda x : x if x > bt else bt)
-    df_timebin["WithinTimeBinElapsed"] = df_timebin["WithinTimeBinEnd"] - df_timebin["WithinTimeBinStart"]
-
-    # Obtain active users with jobs within time bin boundary
-    active_users = df_timebin["User"].value_counts().index.tolist()
-
-    # Get usages for each user
-    for active_user in active_users:
-        df_timebin_user = df_timebin[df_timebin["User"] == active_user]
-        for observable in observables:
-            res = df_timebin_user[observable] * df_timebin_user["WithinTimeBinElapsed"] / time_res
-            user_sum = res.sum()
-            d[active_user][observable][i] = user_sum
+# Running usage per user, averaged over each time bin: each job counts for the
+# part of [Start, End) that overlaps the bin.
+d = per_user_series(df, "Start", "End", users, bin_edges, True)
 
 # ---- Event-driven snapshot computation ----
 # Collect all unique event timestamps (job starts + ends) within the time window
@@ -291,23 +314,8 @@ events.update(df["End"].tolist())
 snapshot_from_time = to_time - 3600 * 24 * 3  # last 3 days only
 snapshot_time_idxs = sorted([t for t in events if snapshot_from_time <= t <= to_time])
 
-# Initialize snapshot data structure
-d_snapshot = {}
-for user in users:
-    d_snapshot[user] = {}
-    for observable in observables:
-        d_snapshot[user][observable] = [0] * len(snapshot_time_idxs)
-
-# At each event timestamp, snapshot what's running per user
-for i, t in enumerate(snapshot_time_idxs):
-    df_snapshot = df.loc[(df.Start <= t) & (df.End > t)]
-    active_users = df_snapshot["User"].unique()
-    for active_user in active_users:
-        if active_user not in d_snapshot:
-            continue
-        df_user = df_snapshot[df_snapshot["User"] == active_user]
-        for observable in observables:
-            d_snapshot[active_user][observable][i] = df_user[observable].sum()
+# At each event timestamp, what's running per user (Start <= t < End)
+d_snapshot = per_user_series(df, "Start", "End", users, snapshot_time_idxs, False)
 
 dfs = []
 for observable in observables:
@@ -359,31 +367,99 @@ json_time_idxs = [
     for t in time_idxs
 ]
 
-json_observables = {}
-for observable in observables:
-    json_observables[shortnames[observable]] = {}
-    for user in users:
-        json_observables[shortnames[observable]][user] = [round(v, 2) for v in d[user][observable]]
+def compact(values):
+    # 2 decimals; whole numbers as ints ("3" not "3.0") to keep the JSON small
+    out = []
+    for v in values:
+        v = round(float(v), 2)
+        out.append(int(v) if v.is_integer() else v)
+    return out
 
-# Build snapshot JSON arrays
-json_snapshot_time_idxs = [
-    datetime.datetime.fromtimestamp(t, tz=eastern_timezone).strftime('%Y-%m-%dT%H:%M:%S%z')
-    for t in snapshot_time_idxs
-]
+def json_series(series, user_list):
+    # The four main observables list every user (as before); the per-GPU-type
+    # series only list users with nonzero values (the dashboard treats a
+    # missing user as all zeros).
+    out = {}
+    for o in all_observables:
+        key = shortnames.get(o, o)
+        out[key] = {}
+        for user in user_list:
+            vals = series[user][o]
+            if o in observables or np.any(vals):
+                out[key][user] = compact(vals)
+    return out
 
-json_observables_snapshot = {}
-for observable in observables:
-    json_observables_snapshot[shortnames[observable]] = {}
-    for user in users:
-        json_observables_snapshot[shortnames[observable]][user] = [round(float(v), 2) for v in d_snapshot[user][observable]]
+#----------------------------------------
+# Stable per-user colors
+#----------------------------------------
+# The dashboard has 8 categorical color slots. The most significant users get
+# one and keep it across runs (user_colors.json); everyone else is drawn as
+# "Other". Significance = a user's largest share of any 30-day running or
+# pending total, or of all-time monthly GPU-hours, so a heavy GPU user with
+# few CPUs still gets a color. Slots only change hands when a newcomer enters
+# the top 8 and none is free: the weakest holder gives theirs up.
+# (Delete user_colors.json to reassign everything from scratch.)
+N_COLOR_SLOTS = 8
+
+def usage_shares(series):
+    out = {}
+    for o in observables:
+        tot = {u: float(np.sum(series[u][o])) for u in series}
+        s = sum(tot.values())
+        for u, v in tot.items():
+            if s > 0:
+                out[u] = max(out.get(u, 0.0), v / s)
+    return out
+
+score = {}
+gpu_hours_alltime = {}
+if os.path.exists("gpu_usage/gpu_monthly_by_user.csv"):
+    with open("gpu_usage/gpu_monthly_by_user.csv") as f:
+        for r in csv.DictReader(f):
+            if r["qos"] == qos:
+                gpu_hours_alltime[r["user"]] = gpu_hours_alltime.get(r["user"], 0.0) + float(r["gpu_hours"] or 0)
+gh_total = sum(gpu_hours_alltime.values())
+monthly_share = {u: v / gh_total for u, v in gpu_hours_alltime.items()} if gh_total > 0 else {}
+for part in (usage_shares(d), usage_shares(d_pending), monthly_share):
+    for u, v in part.items():
+        score[u] = max(score.get(u, 0.0), v)
+
+try:
+    with open("user_colors.json") as f:
+        all_colors = json.load(f)
+except (OSError, ValueError):
+    all_colors = {}
+user_colors = {u: s for u, s in all_colors.get(qos, {}).items()
+               if score.get(u, 0) > 0 and isinstance(s, int) and 0 <= s < N_COLOR_SLOTS}
+ranked = sorted((u for u in score if score[u] > 0), key=lambda u: (-score[u], u))
+newcomers = [u for u in ranked[:N_COLOR_SLOTS] if u not in user_colors]
+free_slots = lambda: sorted(set(range(N_COLOR_SLOTS)) - set(user_colors.values()))
+# Pass 1: a newcomer whose slot in another QoS tab is free here takes it, so
+# the same person tends to keep one color across tabs too.
+for u in newcomers:
+    pref = [m[u] for q, m in sorted(all_colors.items()) if q != qos and m.get(u) in free_slots()]
+    if pref:
+        user_colors[u] = pref[0]
+# Pass 2: the rest take the lowest free slot, or the weakest holder's.
+for u in newcomers:
+    if u in user_colors:
+        continue
+    free = free_slots()
+    if free:
+        user_colors[u] = free[0]
+    else:
+        weakest = min(user_colors, key=lambda x: (score.get(x, 0), x))
+        user_colors[u] = user_colors.pop(weakest)
+all_colors[qos] = user_colors
+with open("user_colors.json", "w") as f:
+    json.dump(all_colors, f, indent=1, sort_keys=True)
 
 fmt_ts = lambda t: datetime.datetime.fromtimestamp(t, tz=eastern_timezone).strftime('%Y-%m-%dT%H:%M:%S%z')
-json_observables_pending = {shortnames[o]: {} for o in observables}
-json_observables_snapshot_pending = {shortnames[o]: {} for o in observables}
-for user in pending_users:
-    for o in observables:
-        json_observables_pending[shortnames[o]][user] = [round(float(v), 2) for v in d_pending[user][o]]
-        json_observables_snapshot_pending[shortnames[o]][user] = [round(float(v), 2) for v in d_pending_snapshot[user][o]]
+json_observables = json_series(d, users)
+json_snapshot_time_idxs = [fmt_ts(t) for t in snapshot_time_idxs]
+json_observables_snapshot = json_series(d_snapshot, users)
+json_observables_pending = json_series(d_pending, pending_users)
+json_observables_snapshot_pending = json_series(d_pending_snapshot, pending_users)
 
 json_data = {
     "metadata": {
@@ -403,7 +479,9 @@ json_data = {
     "observables_snapshot": json_observables_snapshot,
     "thresholds": {shortnames[k]: v for k, v in thresholds.items()},
     "nice_names": {shortnames[k]: v for k, v in nicenames.items()},
+    "gpu_types": gpu_type_observables,
+    "user_colors": user_colors,
 }
 
 with open(f"data_{qos}.json", "w") as f:
-    json.dump(json_data, f)
+    json.dump(json_data, f, separators=(",", ":"))
