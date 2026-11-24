@@ -66,6 +66,7 @@ body {
 }
 .tabs {
   display: flex;
+  flex-wrap: wrap;
   gap: 4px;
   padding: 12px 24px;
   background: var(--bg-secondary);
@@ -222,6 +223,8 @@ tr:nth-child(even) { background: var(--table-stripe); }
   <button class="tab" data-tab="avery-b">avery-b</button>
   <button class="tab" data-tab="p.chang">p.chang</button>
   <button class="tab" data-tab="p.chang-b">p.chang-b</button>
+  <button class="tab" data-tab="cmsdata">cmsdata</button>
+  <button class="tab" data-tab="cmsdata-b">cmsdata-b</button>
 </div>
 
 <div id="qos-section">
@@ -335,6 +338,8 @@ tr:nth-child(even) { background: var(--table-stripe); }
     'avery-b': 'data_avery-b.json',
     'p.chang': 'data_p.chang.json',
     'p.chang-b': 'data_p.chang-b.json',
+    'cmsdata': 'data_cmsdata.json',
+    'cmsdata-b': 'data_cmsdata-b.json',
   };
   const REFRESH_MS = 5 * 60 * 1000;
   const OBS_KEYS = ['NCPUS', 'NGPUS', 'MEMORY', 'NJOBS'];
