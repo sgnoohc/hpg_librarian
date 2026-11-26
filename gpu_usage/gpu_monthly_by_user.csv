@@ -97,7 +97,7 @@ month,qos,user,gpu_type,gpu_hours,gpu_hours_queued,n_gpu_jobs
 2026-10,avery,k.mohrman,l4,0.2,0.3,6
 2026-10,avery,gkehris,unspecified,0.1,0.0,1
 2026-10,avery,tkolberg.fsu,unspecified,0.0,0.8,1
-2026-11,avery,tkolberg.fsu,l4,5576.0,413.5,3798
+2026-11,avery,tkolberg.fsu,l4,5667.8,436.1,4120
 2026-11,avery,pl21e.fsu,l4,403.5,2689.0,2581
 2026-11,avery,ekoenig,l4,187.4,184.3,1784
 2026-11,avery,lagray.fnal,b200,77.2,4.5,17
